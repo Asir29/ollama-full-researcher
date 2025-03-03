@@ -1,5 +1,4 @@
 from langsmith import traceable
-from tavily import TavilyClient
 
 def deduplicate_and_format_sources(search_response, max_tokens_per_source, include_raw_content=True):
     """
@@ -68,24 +67,60 @@ def format_sources(search_results):
         for source in search_results['results']
     )
 
-@traceable
-def tavily_search(query, include_raw_content=True, max_results=3):
-    """ Search the web using the Tavily API.
+# @traceable
+# def search_web(query, include_raw_content=True, max_results=3):
+#     """Search the web using Agno with DuckDuckGo and ArXiv tools.
     
-    Args:
-        query (str): The search query to execute
-        include_raw_content (bool): Whether to include the raw_content from Tavily in the formatted string
-        max_results (int): Maximum number of results to return
+#     Args:
+#         query (str): The search query to execute
+#         include_raw_content (bool): Whether to include the raw content in results
+#         max_results (int): Maximum number of results to return
         
-    Returns:
-        dict: Tavily search response containing:
-            - results (list): List of search result dictionaries, each containing:
-                - title (str): Title of the search result
-                - url (str): URL of the search result
-                - content (str): Snippet/summary of the content
-                - raw_content (str): Full content of the page if available"""
-     
-    tavily_client = TavilyClient()
-    return tavily_client.search(query, 
-                         max_results=max_results, 
-                         include_raw_content=include_raw_content)
+#     Returns:
+#         dict: Search response containing:
+#             - results (list): List of search result dictionaries, each containing:
+#                 - title (str): Title of the search result
+#                 - url (str): URL of the search result
+#                 - content (str): Snippet/summary of the content
+#                 - raw_content (str): Full content if available
+#     """
+#     # Initialize agent with search tools
+#     agent = Agent()
+#     agent.add_tools([
+#         DuckDuckGoTools(),
+#         ArxivTools()
+#     ])
+
+#     # Define the search task
+#     search_task = {
+#         "task": f"Search for information about: {query}",
+#         "instructions": [
+#             "Use both DuckDuckGo and ArXiv to find relevant information",
+#             "Combine and rank results by relevance",
+#             f"Return top {max_results} most relevant results",
+#             "For each result, provide title, URL, summary content, and full content if available"
+#         ],
+#         "output_format": {
+#             "results": [
+#                 {
+#                     "title": "str",
+#                     "url": "str",
+#                     "content": "str",
+#                     "raw_content": "str" if include_raw_content else ""
+#                 }
+#             ]
+#         }
+#     }
+
+#     # Execute search
+#     try:
+#         response = agent.execute(search_task)
+#         return {
+#             "results": response.get("results", [])[:max_results]
+#         }
+#     except Exception as e:
+#         print(f"Search error: {str(e)}")
+#         return {"results": []}
+
+# # Maintain compatibility with existing code
+# tavily_search = search_web

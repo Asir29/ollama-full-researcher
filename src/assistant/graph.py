@@ -9,11 +9,19 @@ from langchain_ollama import ChatOllama
 from langgraph.graph import START, END, StateGraph
 
 from assistant.configuration import Configuration
-from assistant.utils import deduplicate_and_format_sources, tavily_search, format_sources
+from assistant.utils import deduplicate_and_format_sources, format_sources
 from assistant.state import SummaryState, SummaryStateInput, SummaryStateOutput
-from assistant.prompts import query_writer_instructions, summarizer_instructions, reflection_instructions
+from assistant.prompts import query_writer_instructions, summarizer_instructions, reflection_instructions, web_search_instructions, web_search_description, web_search_expected_output
 from copilotkit.langgraph import copilotkit_emit_message, copilotkit_exit, copilotkit_customize_config
 from langgraph.checkpoint.memory import MemorySaver
+
+from agno.agent import Agent
+from agno.tools.googlesearch import GoogleSearchTools
+from agno.tools.duckduckgo import DuckDuckGoTools
+from agno.models.ollama import Ollama
+from langchain_ollama import ChatOllama
+from assistant.configuration import Configuration
+
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -44,7 +52,9 @@ async def generate_query(state: SummaryState, config: RunnableConfig):
 
 async def web_research(state: SummaryState, config: RunnableConfig):
     """ Gather information from the web """
-    
+    max_results = 5
+    include_raw_content = True
+
     # Customize config to not emit tool calls during web search
     config = copilotkit_customize_config(config, emit_tool_calls=False)
     
@@ -53,11 +63,46 @@ async def web_research(state: SummaryState, config: RunnableConfig):
         "content": f"Searching for: {state.search_query}"
     }))
     
+    configurable = Configuration.from_runnable_config(config)
     # Search the web
-    search_results = tavily_search(state.search_query, include_raw_content=True, max_results=1)
+    agent = Agent(
+        model=Ollama(id="mistral-nemo"),
+        tools=[GoogleSearchTools()],
+        show_tool_calls=False,
+        markdown=True
+        
+    )
+
+    query = web_search_instructions + "\n Search for the following query: " + state.search_query + "\n"
+    run_response = agent.run(query)
+    content = run_response.content
+
+    return {"raw_search_result": content}
     
+async def json_parser(state: SummaryState, config: RunnableConfig):
+    """ Parse the JSON output from the web search """
+    await copilotkit_emit_message(config, json.dumps({
+        "node": "JSON Pasrser",
+        "content": "Parsing JSON output..."
+    }))
+
+    configurable = Configuration.from_runnable_config(config)
+    llm = ChatOllama(model=configurable.local_llm, temperature=0)
+    result = await llm.ainvoke(
+        [SystemMessage(content=web_search_expected_output),
+        HumanMessage(content=state.raw_search_result)]
+    )
+    content = result.content
+    start_index = content.find("{")
+    strip_content = content[start_index:] if start_index != -1 else content
+    end_index = strip_content.rfind("}")
+    search_str = strip_content[:end_index+1] if end_index != -1 else strip_content
+
+    [print(f"Search results: {search_str}")]
+
+    search_results = json.loads(search_str)
     # Format the sources
-    search_str = deduplicate_and_format_sources(search_results, max_tokens_per_source=1000)
+    search_str = deduplicate_and_format_sources(search_results, max_tokens_per_source=3000)
     
     await copilotkit_emit_message(config, json.dumps({
         "node": "Web Research",
@@ -179,8 +224,21 @@ def route_research(state: SummaryState, config: RunnableConfig) -> Literal["fina
         return "web_research"
     else:
         return "finalize_summary" 
-    
+
+    # agent = Agent(
+    #     model=Ollama(id="mistral-nemo"),
+    #     tools=[GoogleSearchTools()],
+    #     show_tool_calls=False,
+    #     structured_outputs=True
+
+    # )   
+
+
+
+
 # Add nodes and edges 
+
+
 builder = StateGraph(SummaryState, input=SummaryStateInput, output=SummaryStateOutput, config_schema=Configuration)
 
 # Add nodes with potential interrupts
@@ -189,11 +247,13 @@ builder.add_node("web_research", web_research)
 builder.add_node("summarize_sources", summarize_sources)
 builder.add_node("reflect_on_summary", reflect_on_summary)
 builder.add_node("finalize_summary", finalize_summary)
+builder.add_node("json_parser", json_parser)
 
 # Add edges
 builder.add_edge(START, "generate_query")
 builder.add_edge("generate_query", "web_research")
-builder.add_edge("web_research", "summarize_sources")
+builder.add_edge("web_research", "json_parser")
+builder.add_edge("json_parser", "summarize_sources")
 builder.add_edge("summarize_sources", "reflect_on_summary")
 builder.add_conditional_edges("reflect_on_summary", route_research)
 builder.add_edge("finalize_summary", END)
