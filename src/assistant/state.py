@@ -11,6 +11,7 @@ class SummaryState:
     research_loop_count: int = field(default=0) # Research loop count
     running_summary: str = field(default=None) # Final report
     raw_search_result: str = field(default=None) # Final report
+    route: str = field(default=None) # Route to the next state
 @dataclass(kw_only=True)
 class SummaryStateInput(TypedDict):
     research_topic: str = field(default=None) # Report topic     

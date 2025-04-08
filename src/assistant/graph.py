@@ -11,7 +11,7 @@ from langgraph.graph import START, END, StateGraph
 from assistant.configuration import Configuration
 from assistant.utils import deduplicate_and_format_sources, format_sources
 from assistant.state import SummaryState, SummaryStateInput, SummaryStateOutput
-from assistant.prompts import query_writer_instructions, summarizer_instructions, reflection_instructions, web_search_instructions, web_search_description, web_search_expected_output
+from assistant.prompts import query_writer_instructions, summarizer_instructions, reflection_instructions, web_search_instructions, web_search_description, web_search_expected_output, router_instructions
 from copilotkit.langgraph import copilotkit_emit_message, copilotkit_exit, copilotkit_customize_config
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -22,12 +22,71 @@ from agno.models.ollama import Ollama
 from langchain_ollama import ChatOllama
 from assistant.configuration import Configuration
 
+from scholarly import scholarly
+
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Nodes   
+
+# Nodes
+   
+
+async def route_question(state: SummaryState, config: RunnableConfig):
+    """ Route question to the appropriate node """
+
+    print(f"Current state: {state}")
+
+    await copilotkit_emit_message(config, json.dumps({
+        "node": "Routing Question",
+        "content": "Routing question to the appropriate node..."
+    }))
+    
+    # Customize config to not emit tool calls during routing
+    config = copilotkit_customize_config(config, emit_tool_calls=False)
+
+    configurable = Configuration.from_runnable_config(config)
+
+    llm_json_mode = ChatOllama(model=configurable.local_llm, temperature=0, format="json")
+
+    # Send system and human messages
+    result = await llm_json_mode.ainvoke([ 
+        SystemMessage(content=router_instructions),
+        HumanMessage(content=f"Research Topic: {state.research_topic}")
+    ])
+
+    print(f"Routing result: {result.content}")
+
+    result_content = json.loads(result.content)
+
+    # Extract the 'response' field from the result content (this is a hashable value)
+    response = result_content.get("response")
+
+    # Log the response to ensure it's being extracted correctly
+    print(f"Response extracted: {response}")
+
+    # Return state update instead of raw string
+    if response == "Academic Source":
+        return {"route": "Academic Source"}
+    else:
+        return {"route": "General Web Search"}
+
+  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 async def generate_query(state: SummaryState, config: RunnableConfig):
     """ Generate a query for web search """
     
@@ -50,8 +109,11 @@ async def generate_query(state: SummaryState, config: RunnableConfig):
     }))
     return {"search_query": query['query']}
 
+
 async def web_research(state: SummaryState, config: RunnableConfig):
     """ Gather information from the web """
+
+    print("IN WEB RESEARCH")    
     max_results = 5
     include_raw_content = True
 
@@ -74,11 +136,56 @@ async def web_research(state: SummaryState, config: RunnableConfig):
     )
 
     query = web_search_instructions + "\n Search for the following query: " + state.search_query + "\n"
-    run_response = agent.run(query)
+    #run_response = agent.run(query)
+    run_response = await agent.arun(query)  # ✅ Non-blocking!
+
     content = run_response.content
 
     return {"raw_search_result": content}
+
+
+
+async def academic_research(state: SummaryState, config: RunnableConfig):
+    """ Gather information from academic sources """
+
+    print(f"IN ACADEMIC RESEARCH")
+    print(f"Current state: {state}")
+
+    try:
+        await copilotkit_emit_message(config, json.dumps({
+            "node": "Academic Research",
+            "content": f"Searching for: {state.search_query}"
+        }))
+        
+        # Customize config to not emit tool calls during web search
+        config = copilotkit_customize_config(config, emit_tool_calls=False)
+
+        # Search the web using the scholarly library
+        agent = scholarly
+
+        # Perform the search
+        search_query = agent.search_pubs(state.search_query)
+        first_result = next(search_query, None)  # Get the first result or None if no results
+
+        if first_result is None:
+            raise ValueError("No results found for the given search query.")
+
+        # Format the result
+        scholarly.pprint(first_result)  # Optional: Print for debugging
+        content = {
+            "title": first_result.get("bib", {}).get("title", "No Title"),
+            "author": first_result.get("bib", {}).get("author", "Unknown Author"),
+            "abstract": first_result.get("bib", {}).get("abstract", "No Abstract"),
+            "url": first_result.get("eprint_url", "No URL")
+        }
+
+        return {"raw_search_result": content}
+
+    except Exception as e:
+        # Log or handle the exception as needed
+        raise RuntimeError(f"Error in academic_research: {str(e)}")
     
+
 async def json_parser(state: SummaryState, config: RunnableConfig):
     """ Parse the JSON output from the web search """
     await copilotkit_emit_message(config, json.dumps({
@@ -243,19 +350,31 @@ builder = StateGraph(SummaryState, input=SummaryStateInput, output=SummaryStateO
 
 # Add nodes with potential interrupts
 builder.add_node("generate_query", generate_query)
+builder.add_node("route_question", route_question)
 builder.add_node("web_research", web_research)
 builder.add_node("summarize_sources", summarize_sources)
 builder.add_node("reflect_on_summary", reflect_on_summary)
 builder.add_node("finalize_summary", finalize_summary)
 builder.add_node("json_parser", json_parser)
+builder.add_node("academic_research", academic_research)
 
 # Add edges
 builder.add_edge(START, "generate_query")
-builder.add_edge("generate_query", "web_research")
+builder.add_edge("generate_query", "route_question")
+builder.add_conditional_edges(
+    "route_question",
+    lambda state: state.route,  # Read route from state
+    {
+        "Academic Source": "academic_research",
+        "General Web Search": "web_research"
+    }
+)
+
 builder.add_edge("web_research", "json_parser")
 builder.add_edge("json_parser", "summarize_sources")
 builder.add_edge("summarize_sources", "reflect_on_summary")
 builder.add_conditional_edges("reflect_on_summary", route_research)
+builder.add_edge("academic_research", END)
 builder.add_edge("finalize_summary", END)
 
 # Add memory saver for checkpointing
@@ -263,5 +382,6 @@ memory = MemorySaver()
 
 # Compile graph with checkpointing and interrupts
 graph = builder.compile(
-    checkpointer=memory
+#    checkpointer=memory
 )
+

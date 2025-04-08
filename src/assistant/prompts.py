@@ -13,6 +13,24 @@ Return your query as a JSON object:
 }}
 """
 
+router_instructions="""You are an intelligent decision-making assistant.
+Your task is to analyze the user's question and determine the best source to search for a high-quality answer.
+Choose between:
+
+"Academic Source": If the question requires in-depth technical, scientific, scholarly, or programming-related content typically found in academic papers, code notebooks, or specialized documentation (e.g., Google Colab, arXiv, or Stack Overflow).
+
+"General Web Search": If the question relates to general knowledge, recent news, opinions, product info, how-tos, entertainment, or any casual or non-technical topic.
+
+Your output must be only one of the following:
+
+Academic Source
+
+General Web Search
+
+Analyze the user's question and reply with the best option."""
+
+
+
 summarizer_instructions="""Your goal is to generate a high-quality summary of the web search results.
 
 When EXTENDING an existing summary:
