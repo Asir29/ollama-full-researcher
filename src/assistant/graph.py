@@ -373,18 +373,20 @@ def generate_code(question: str, config: RunnableConfig) -> CodeOutput:
 
     response = ChatOllama(model=configurable.local_llm).invoke(get_prompt_code_assistant().format(messages=messages))
     
-    #print("RAW RESPONSE:\n", response)
+    #print("RESPONSE TYPE:\n", response)
     
     # Extract prefix
-    prefix_match = re.search(r'1\)\s*(.*?)\s*2\)', response, re.DOTALL)
+    prefix_match = re.search(r'1\)\s*(.*?)\s*2\)', response.content, re.DOTALL)
     prefix = prefix_match.group(1).strip() if prefix_match else ""
     
     # Extract imports
-    imports_match = re.search(r'2\)\s*Imports:\s*```python\n(.*?)\n```', response, re.DOTALL)
+    imports_match = re.search(r'2\)\s*Imports:\s*```python\n(.*?)\n```', response.content, re.DOTALL)
     imports = imports_match.group(1).strip() if imports_match else ""
     
+
+    print(type(response))
     # Extract code
-    code_match = re.search(r'3\)\s*Functioning Code Block:\s*```python\n(.*?)\n```', response, re.DOTALL)
+    code_match = re.search(r'3\)\s*Functioning Code Block:\s*```python\n(.*?)\n```', response.content, re.DOTALL)
     code = code_match.group(1).strip() if code_match else ""
     
     print("PREFIX:\n", prefix)
@@ -442,6 +444,11 @@ def code_check(state: SummaryState):
     messages = state.messages
     code_solution = state.code_generation
     iterations = state.code_iterations
+
+    if code_solution is None:
+        logger.error("code_solution is None. Cannot check code.")
+        return
+    imports = code_solution.imports
 
     # Get solution components
     imports = code_solution.imports
@@ -545,7 +552,6 @@ builder.add_node("check_code", code_check)  # check code
 
 # Add edges
 builder.add_edge(START, "route_question")
-builder.add_edge("route_question", "generate_query")
 builder.add_edge("generate_query", "web_research")
 
 builder.add_conditional_edges(
