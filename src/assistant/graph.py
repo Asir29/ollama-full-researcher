@@ -24,6 +24,18 @@ from assistant.configuration import Configuration
 
 from scholarly import scholarly
 
+from typing import Annotated, TypedDict
+
+from langgraph.graph.message import AnyMessage, add_messages
+
+from langchain_core.prompts import ChatPromptTemplate
+
+#from utils import get_prompt_code_assistant
+
+import re
+
+
+
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -31,8 +43,6 @@ logger = logging.getLogger(__name__)
 
 
 # Nodes
-   
-
 async def route_question(state: SummaryState, config: RunnableConfig):
     """ Route question to the appropriate node """
 
@@ -61,7 +71,7 @@ async def route_question(state: SummaryState, config: RunnableConfig):
     result_content = json.loads(result.content)
 
     # Extract the 'response' field from the result content (this is a hashable value)
-    response = result_content.get("response")
+    response = result_content.get("option")
 
     # Log the response to ensure it's being extracted correctly
     print(f"Response extracted: {response}")
@@ -69,21 +79,13 @@ async def route_question(state: SummaryState, config: RunnableConfig):
     # Return state update instead of raw string
     if response == "Academic Source":
         return {"route": "Academic Source"}
-    else:
+    elif response == "Code":
+        return {"route": "Code"}
+    elif response == "General Web Search":
         return {"route": "General Web Search"}
-
-  
-
-
-
-
-
-
-
-
-
-
-
+    else:
+        # Fallback to a default route
+        return {"route": "Code"}
 
 
 
@@ -145,46 +147,43 @@ async def web_research(state: SummaryState, config: RunnableConfig):
 
 
 
-async def academic_research(state: SummaryState, config: RunnableConfig):
-    """ Gather information from academic sources """
+import asyncio
+from scholarly import scholarly
+import os
 
-    print(f"IN ACADEMIC RESEARCH")
-    print(f"Current state: {state}")
+async def academic_research(state, config, n=5):
+    """Perform academic research using scholarly and extract abstracts of the first n publications"""
+    abstracts = []
 
     try:
-        await copilotkit_emit_message(config, json.dumps({
-            "node": "Academic Research",
-            "content": f"Searching for: {state.search_query}"
-        }))
-        
-        # Customize config to not emit tool calls during web search
-        config = copilotkit_customize_config(config, emit_tool_calls=False)
+        # Search for the publications
+        try:
+            search_results = scholarly.search_pubs(state.search_query) 
+            if not search_results:
+                print("No search results found.")
+                return {"raw_search_results": []} 
 
-        # Search the web using the scholarly library
-        agent = scholarly
+            # Loop through the first n results
+            for i, result in enumerate(search_results[:n]):
+                abstract = result.get("bib", {}).get("abstract", "No Abstract")
+                abstracts.append(abstract)
+                print(f"Abstract {i+1}: {abstract}")
 
-        # Perform the search
-        search_query = agent.search_pubs(state.search_query)
-        first_result = next(search_query, None)  # Get the first result or None if no results
+        except Exception as e:
+            print(f"Error during search_pubs: {e}")
+            return {"raw_search_results": []}
 
-        if first_result is None:
-            raise ValueError("No results found for the given search query.")
-
-        # Format the result
-        scholarly.pprint(first_result)  # Optional: Print for debugging
-        content = {
-            "title": first_result.get("bib", {}).get("title", "No Title"),
-            "author": first_result.get("bib", {}).get("author", "Unknown Author"),
-            "abstract": first_result.get("bib", {}).get("abstract", "No Abstract"),
-            "url": first_result.get("eprint_url", "No URL")
-        }
-
-        return {"raw_search_result": content}
+        return {"raw_search_results": abstracts}
 
     except Exception as e:
-        # Log or handle the exception as needed
-        raise RuntimeError(f"Error in academic_research: {str(e)}")
-    
+        print(f"General error in academic_research: {e}")
+        return {"raw_search_results": []}
+
+    finally:
+        print("Exiting academic_research function.")
+
+
+
 
 async def json_parser(state: SummaryState, config: RunnableConfig):
     """ Parse the JSON output from the web search """
@@ -340,6 +339,188 @@ def route_research(state: SummaryState, config: RunnableConfig) -> Literal["fina
 
     # )   
 
+from langchain_core.pydantic_v1 import BaseModel, Field
+
+
+# Data model for the Code
+class CodeOutput(BaseModel):
+    """Code output"""
+    prefix: str = Field(description="Description of the problem and approach")
+    imports: str = Field(description="Code block import statements")
+    code: str = Field(description="Code block not including import statements")
+    
+
+def get_prompt_code_assistant():
+
+    return ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """You are a coding assistant. Ensure any code you provide can be executed with all required imports and variables 
+                defined. Structure your answer: 1) a prefix describing the code solution, 2) the imports, 3) the functioning code block.
+                \n Here is the user question:""",
+            ),
+            ("user", "{messages}"),
+        ]
+    )
+
+
+# Function to generate code
+def generate_code(question: str, config: RunnableConfig) -> CodeOutput:
+    messages = [question]
+
+    configurable = Configuration.from_runnable_config(config)
+
+    response = ChatOllama(model=configurable.local_llm).invoke(get_prompt_code_assistant().format(messages=messages))
+    
+    #print("RAW RESPONSE:\n", response)
+    
+    # Extract prefix
+    prefix_match = re.search(r'1\)\s*(.*?)\s*2\)', response, re.DOTALL)
+    prefix = prefix_match.group(1).strip() if prefix_match else ""
+    
+    # Extract imports
+    imports_match = re.search(r'2\)\s*Imports:\s*```python\n(.*?)\n```', response, re.DOTALL)
+    imports = imports_match.group(1).strip() if imports_match else ""
+    
+    # Extract code
+    code_match = re.search(r'3\)\s*Functioning Code Block:\s*```python\n(.*?)\n```', response, re.DOTALL)
+    code = code_match.group(1).strip() if code_match else ""
+    
+    print("PREFIX:\n", prefix)
+    print("IMPORTS:\n", imports)
+    print("CODE:\n", code)
+
+    return CodeOutput(prefix=prefix, imports=imports, code=code)
+
+### Nodes
+def generate(state: SummaryState, config: RunnableConfig):
+    """
+    Generate a code solution
+
+    Args:
+        state (dict): The current graph state
+
+    Returns:
+        state (dict): New key added to state, generation
+    """
+
+    print("---GENERATING CODE SOLUTION---")
+
+    # State
+    messages = state.messages
+    iterations = state.code_iterations
+
+    # Solution
+    code_solution = generate_code(messages, config)
+    messages += [
+        (
+            "assistant",
+            f"Here is my attempt to solve the problem: {code_solution.prefix} \n Imports: {code_solution.imports} \n Code: {code_solution.code}",
+        )
+    ]
+
+    # Increment
+    iterations = iterations + 1
+    return {"generation": code_solution, "messages": messages, "iterations": iterations}
+
+
+def code_check(state: SummaryState):
+    """
+    Check code
+
+    Args:
+        state (dict): The current graph state
+
+    Returns:
+        state (dict): New key added to state, error
+    """
+
+    print("---CHECKING CODE---")
+
+    # State
+    messages = state.messages
+    code_solution = state.code_generation
+    iterations = state.code_iterations
+
+    # Get solution components
+    imports = code_solution.imports
+    code = code_solution.code
+
+    # Check imports
+    try:
+        exec(imports) # Check imports, it actually executes the imports
+    except Exception as e:
+        print("---CODE IMPORT CHECK: FAILED---")
+        error_message = [
+            (
+                "user",
+                f"Your solution failed the import test. Here is the error: {e}. Reflect on this error and your prior attempt to solve the problem. (1) State what you think went wrong with the prior solution and (2) try to solve this problem again. Return the FULL SOLUTION. Use the code tool to structure the output with a prefix, imports, and code block:",
+            )
+        ]
+        messages += error_message
+        return {
+            "generation": code_solution,
+            "messages": messages,
+            "iterations": iterations,
+            "error": "yes",
+        }
+
+    # Check execution
+    try:
+        combined_code = f"{imports}\n{code}"
+        print(f"CODE TO TEST: {combined_code}")
+        # Use a shared scope for exec
+        global_scope = {}
+        exec(combined_code, global_scope)
+    except Exception as e:
+        print("---CODE BLOCK CHECK: FAILED---")
+        error_message = [
+            (
+                "user",
+                f"Your solution failed the code execution test: {e}) Reflect on this error and your prior attempt to solve the problem. (1) State what you think went wrong with the prior solution and (2) try to solve this problem again. Return the FULL SOLUTION. Use the code tool to structure the output with a prefix, imports, and code block:",
+            )
+        ]
+        messages += error_message
+        return {
+            "generation": code_solution,
+            "messages": messages,
+            "iterations": iterations,
+            "error": "yes",
+        }
+
+    # No errors
+    print("---NO CODE TEST FAILURES---")
+    return {
+        "generation": code_solution,
+        "messages": messages,
+        "iterations": iterations,
+        "error": "no",
+    }
+
+
+
+
+
+def decide_to_finish(state: SummaryState):
+    """
+    Determines whether to finish.
+
+    Args:
+        state (dict): The current graph state
+
+    Returns:
+        str: Next node to call
+    """
+    error = state.error
+    iterations = state.code_iterations
+
+    if error == "no" or iterations == max_iterations:
+        print("---DECISION: FINISH---")
+        return "end"
+    else:
+        print("---DECISION: RE-TRY SOLUTION---")
+        return "generate"
 
 
 
@@ -356,17 +537,24 @@ builder.add_node("summarize_sources", summarize_sources)
 builder.add_node("reflect_on_summary", reflect_on_summary)
 builder.add_node("finalize_summary", finalize_summary)
 builder.add_node("json_parser", json_parser)
+
 builder.add_node("academic_research", academic_research)
 
+builder.add_node("generate", generate)  # generation solution
+builder.add_node("check_code", code_check)  # check code
+
 # Add edges
-builder.add_edge(START, "generate_query")
-builder.add_edge("generate_query", "route_question")
+builder.add_edge(START, "route_question")
+builder.add_edge("route_question", "generate_query")
+builder.add_edge("generate_query", "web_research")
+
 builder.add_conditional_edges(
     "route_question",
     lambda state: state.route,  # Read route from state
     {
         "Academic Source": "academic_research",
-        "General Web Search": "web_research"
+        "General Web Search": "generate_query",
+        "Code": "generate",
     }
 )
 
@@ -376,6 +564,17 @@ builder.add_edge("summarize_sources", "reflect_on_summary")
 builder.add_conditional_edges("reflect_on_summary", route_research)
 builder.add_edge("academic_research", END)
 builder.add_edge("finalize_summary", END)
+
+builder.add_edge("generate", "check_code")
+builder.add_conditional_edges(
+    "check_code",
+    decide_to_finish,
+    {
+        "end": END,
+        "generate": "generate",
+    },
+)
+
 
 # Add memory saver for checkpointing
 memory = MemorySaver()

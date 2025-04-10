@@ -124,3 +124,20 @@ def format_sources(search_results):
 
 # # Maintain compatibility with existing code
 # tavily_search = search_web
+
+# Prompt for coding assistant
+from langchain.prompts import ChatPromptTemplate
+
+def get_prompt_code_assistant():
+
+    return ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """You are a coding assistant. Ensure any code you provide can be executed with all required imports and variables 
+                defined. Structure your answer: 1) a prefix describing the code solution, 2) the imports, 3) the functioning code block.
+                \n Here is the user question:""",
+            ),
+            ("user", "{messages}"),
+        ]
+    )

@@ -17,6 +17,8 @@ router_instructions="""You are an intelligent decision-making assistant.
 Your task is to analyze the user's question and determine the best source to search for a high-quality answer.
 Choose between:
 
+"Code": If the question is about programming, code snippets, or technical implementations that require specific coding knowledge or examples (e.g., Python, JavaScript, etc.).
+
 "Academic Source": If the question requires in-depth technical, scientific, scholarly, or programming-related content typically found in academic papers, code notebooks, or specialized documentation (e.g., Google Colab, arXiv, or Stack Overflow).
 
 "General Web Search": If the question relates to general knowledge, recent news, opinions, product info, how-tos, entertainment, or any casual or non-technical topic.
@@ -26,6 +28,8 @@ Your output must be only one of the following:
 Academic Source
 
 General Web Search
+
+Code
 
 Analyze the user's question and reply with the best option."""
 
@@ -124,3 +128,11 @@ You MUST convert the incoming text into a single JSON, that contains a list of "
 - the main part of the response must be attached inside "content" key of the json object
 - supplementary information must be into the json object as well, like the title of the page, the url of the website from where the information was extracted, and the raw content of the page
 - DO NOT IN ANY WHAY INCLUDE IN THE RESPONSE ANY INFORMATION NOT FORMATTED AS DESCRIBED ABOVE IN JSON FORMAT"""
+
+
+coder_instructions = """ \
+    You are a coding assistant. Ensure any code you provide can be executed with all required imports and variables 
+                defined. Structure your answer: 1) a prefix describing the code solution, 2) the imports, 3) the functioning code block.
+                \n Here is the user question:
+                {question}"""
+
