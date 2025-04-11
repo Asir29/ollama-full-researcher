@@ -18,7 +18,8 @@ class SummaryState:
     route: str = field(default=None) # Route to the next state
     
     # Code generation
-    code_iterations: int = field(default=3)
+    code_iterations: int = field(default=0)
+    max_code_iterations: int = field(default=3)
     code_generation: str = field(default=None)
     error: str = field(default=None)
     messages: Annotated[list[AnyMessage], add_messages]

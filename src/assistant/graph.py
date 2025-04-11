@@ -11,7 +11,7 @@ from langgraph.graph import START, END, StateGraph
 from assistant.configuration import Configuration
 from assistant.utils import deduplicate_and_format_sources, format_sources
 from assistant.state import SummaryState, SummaryStateInput, SummaryStateOutput
-from assistant.prompts import query_writer_instructions, summarizer_instructions, reflection_instructions, web_search_instructions, web_search_description, web_search_expected_output, router_instructions
+from assistant.prompts import query_writer_instructions, summarizer_instructions, reflection_instructions, web_search_instructions, web_search_description, web_search_expected_output, router_instructions, code_assistant_instructions
 from copilotkit.langgraph import copilotkit_emit_message, copilotkit_exit, copilotkit_customize_config
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -33,6 +33,8 @@ from langchain_core.prompts import ChatPromptTemplate
 #from utils import get_prompt_code_assistant
 
 import re
+
+
 
 
 
@@ -350,52 +352,56 @@ class CodeOutput(BaseModel):
     code: str = Field(description="Code block not including import statements")
     
 
-def get_prompt_code_assistant():
-
-    return ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                """You are a coding assistant. Ensure any code you provide can be executed with all required imports and variables 
-                defined. Structure your answer: 1) a prefix describing the code solution, 2) the imports, 3) the functioning code block.
-                \n Here is the user question:""",
-            ),
-            ("user", "{messages}"),
-        ]
-    )
 
 
-# Function to generate code
-def generate_code(question: str, config: RunnableConfig) -> CodeOutput:
+
+# Function to generate code, called by the node "generate"
+def generate_code(question: str, config: RunnableConfig, state: SummaryState) -> CodeOutput:
     messages = [question]
 
     configurable = Configuration.from_runnable_config(config)
 
-    response = ChatOllama(model=configurable.local_llm).invoke(get_prompt_code_assistant().format(messages=messages))
+    agent = Agent(
+        model=Ollama(id="codellama"),
+        tools=[],
+        show_tool_calls=False,
+        structured_outputs=True,
+    )
+
     
-    #print("RESPONSE TYPE:\n", response)
-    
-    # Extract prefix
-    prefix_match = re.search(r'1\)\s*(.*?)\s*2\)', response.content, re.DOTALL)
-    prefix = prefix_match.group(1).strip() if prefix_match else ""
-    
-    # Extract imports
-    imports_match = re.search(r'2\)\s*Imports:\s*```python\n(.*?)\n```', response.content, re.DOTALL)
-    imports = imports_match.group(1).strip() if imports_match else ""
+    query = code_assistant_instructions + "\n Satisfy the following instructions: " + state.research_topic + "\n"
+    response = agent.run(query)  
+
     
 
-    print(type(response))
-    # Extract code
-    code_match = re.search(r'3\)\s*Functioning Code Block:\s*```python\n(.*?)\n```', response.content, re.DOTALL)
-    code = code_match.group(1).strip() if code_match else ""
-    
-    print("PREFIX:\n", prefix)
-    print("IMPORTS:\n", imports)
-    print("CODE:\n", code)
+    response_text = response.content  # This is a string
+    print("RAW RESPONSE TEXT:\n", repr(response_text))
 
-    return CodeOutput(prefix=prefix, imports=imports, code=code)
+    # Find all JSON-like blocks
+    json_matches = re.findall(r'{.*?}', response_text, flags=re.DOTALL)
 
-### Nodes
+    if not json_matches:
+        raise ValueError("No JSON block found in response")
+
+    # Use the second JSON block (actual answer)
+    json_string = json_matches[-1]  # Or json_matches[1] to be explicit
+
+    parsed_response = json.loads(json_string)
+
+    print("PARSED RESPONSE:\n", parsed_response)
+    # Check if the parsed response is a dictionary
+    print("TYPE OF PARSED RESPONSE:\n", type(parsed_response))
+
+    return CodeOutput(
+        prefix=parsed_response["prefix"],
+        imports="\n".join(parsed_response["imports"]) if isinstance(parsed_response["imports"], list) else parsed_response["imports"],
+        code=parsed_response["code"]
+    )
+
+
+
+
+## Function to generate code
 def generate(state: SummaryState, config: RunnableConfig):
     """
     Generate a code solution
@@ -414,7 +420,10 @@ def generate(state: SummaryState, config: RunnableConfig):
     iterations = state.code_iterations
 
     # Solution
-    code_solution = generate_code(messages, config)
+    code_solution = generate_code(messages, config, state)
+
+    
+
     messages += [
         (
             "assistant",
@@ -423,8 +432,8 @@ def generate(state: SummaryState, config: RunnableConfig):
     ]
 
     # Increment
-    iterations = iterations + 1
-    return {"generation": code_solution, "messages": messages, "iterations": iterations}
+    state.code_iterations = state.code_iterations + 1
+    return {"code_generation": code_solution, "messages": messages, "code_iterations": state.code_iterations}
 
 
 def code_check(state: SummaryState):
@@ -440,6 +449,7 @@ def code_check(state: SummaryState):
 
     print("---CHECKING CODE---")
 
+    print(f"Current state: {state}")
     # State
     messages = state.messages
     code_solution = state.code_generation
@@ -467,9 +477,9 @@ def code_check(state: SummaryState):
         ]
         messages += error_message
         return {
-            "generation": code_solution,
+            "code_generation": code_solution,
             "messages": messages,
-            "iterations": iterations,
+            "code_iterations": state.code_iterations,
             "error": "yes",
         }
 
@@ -490,18 +500,18 @@ def code_check(state: SummaryState):
         ]
         messages += error_message
         return {
-            "generation": code_solution,
+            "code_generation": code_solution,
             "messages": messages,
-            "iterations": iterations,
+            "code_iterations": iterations,
             "error": "yes",
         }
 
     # No errors
     print("---NO CODE TEST FAILURES---")
     return {
-        "generation": code_solution,
+        "code_generation": code_solution,
         "messages": messages,
-        "iterations": iterations,
+        "code_iterations": iterations,
         "error": "no",
     }
 
@@ -520,9 +530,9 @@ def decide_to_finish(state: SummaryState):
         str: Next node to call
     """
     error = state.error
-    iterations = state.code_iterations
+    
 
-    if error == "no" or iterations == max_iterations:
+    if error == "no" or state.code_iterations == state.max_code_iterations:
         print("---DECISION: FINISH---")
         return "end"
     else:
@@ -536,24 +546,28 @@ def decide_to_finish(state: SummaryState):
 
 builder = StateGraph(SummaryState, input=SummaryStateInput, output=SummaryStateOutput, config_schema=Configuration)
 
-# Add nodes with potential interrupts
-builder.add_node("generate_query", generate_query)
+
+# node for routing
 builder.add_node("route_question", route_question)
+
+# nodes for web research
+builder.add_node("generate_query", generate_query)
 builder.add_node("web_research", web_research)
 builder.add_node("summarize_sources", summarize_sources)
 builder.add_node("reflect_on_summary", reflect_on_summary)
 builder.add_node("finalize_summary", finalize_summary)
 builder.add_node("json_parser", json_parser)
 
+# node for academic research
 builder.add_node("academic_research", academic_research)
 
+# Add nodes for code generation and code checking
 builder.add_node("generate", generate)  # generation solution
 builder.add_node("check_code", code_check)  # check code
 
 # Add edges
 builder.add_edge(START, "route_question")
 builder.add_edge("generate_query", "web_research")
-
 builder.add_conditional_edges(
     "route_question",
     lambda state: state.route,  # Read route from state

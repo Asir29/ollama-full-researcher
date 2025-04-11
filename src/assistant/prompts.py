@@ -130,9 +130,13 @@ You MUST convert the incoming text into a single JSON, that contains a list of "
 - DO NOT IN ANY WHAY INCLUDE IN THE RESPONSE ANY INFORMATION NOT FORMATTED AS DESCRIBED ABOVE IN JSON FORMAT"""
 
 
-coder_instructions = """ \
+code_assistant_instructions = """ \
     You are a coding assistant. Ensure any code you provide can be executed with all required imports and variables 
-                defined. Structure your answer: 1) a prefix describing the code solution, 2) the imports, 3) the functioning code block.
-                \n Here is the user question:
-                {question}"""
-
+    defined. Structure your answer in JSON format with the following fields:
+    {
+        "prefix": "A description of the code solution",
+        "imports": "The necessary import statements",
+        "code": "The functioning code block"
+    }
+    \n Here is the user question:
+    {question}"""
