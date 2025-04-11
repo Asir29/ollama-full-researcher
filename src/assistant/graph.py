@@ -352,7 +352,16 @@ class CodeOutput(BaseModel):
     code: str = Field(description="Code block not including import statements")
     
 
-
+code_parser_instructions = """\
+    You are a code parser. Your task is to extract the prefix, imports, and code from the following text.
+    The text is a response from a code assistant. The response is structured in JSON format.
+    The output should be a JSON object with the following fields:
+    {
+        "prefix": "A description of the code solution",
+        "imports": "The necessary import statements",
+        "code": "The functioning code block"
+    }
+    """
 
 
 # Function to generate code, called by the node "generate"
@@ -372,25 +381,18 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState) ->
     query = code_assistant_instructions + "\n Satisfy the following instructions: " + state.research_topic + "\n"
     response = agent.run(query)  
 
-    
 
     response_text = response.content  # This is a string
+
     print("RAW RESPONSE TEXT:\n", repr(response_text))
 
-    # Find all JSON-like blocks
-    json_matches = re.findall(r'{.*?}', response_text, flags=re.DOTALL)
+    # Parse the response into dict
+    try:
+        parsed_response = json.loads(response_text)
+    except json.JSONDecodeError as e:
+        print(f"Error during JSON parsing: {e}")
+        return CodeOutput(prefix="", imports="", code="")
 
-    if not json_matches:
-        raise ValueError("No JSON block found in response")
-
-    # Use the second JSON block (actual answer)
-    json_string = json_matches[-1]  # Or json_matches[1] to be explicit
-
-    parsed_response = json.loads(json_string)
-
-    print("PARSED RESPONSE:\n", parsed_response)
-    # Check if the parsed response is a dictionary
-    print("TYPE OF PARSED RESPONSE:\n", type(parsed_response))
 
     return CodeOutput(
         prefix=parsed_response["prefix"],
@@ -398,7 +400,34 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState) ->
         code=parsed_response["code"]
     )
 
+    """
+    # llm to extract the three fields in the best way possible
+    agent = Agent(
+        model=Ollama(id="deepseek-r1"),
+        tools=[],
+        show_tool_calls=False,
+        structured_outputs=True,
+    )
 
+    
+    query = code_parser_instructions + "\n Extract only the three fields from the following: " + response_text + "\n"
+    
+    try:
+        parsed_response = agent.run(query)
+    except Exception as e:
+        print(f"Error during parsing: {e}")
+        return CodeOutput(prefix="", imports="", code="")
+
+    print("PARSED RESPONSE:\n", repr(parsed_response))
+
+
+    return CodeOutput(
+        prefix=parsed_response["prefix"],
+        imports="\n".join(parsed_response["imports"]) if isinstance(parsed_response["imports"], list) else parsed_response["imports"],
+        code=parsed_response["code"]
+    )
+
+    """
 
 
 ## Function to generate code
