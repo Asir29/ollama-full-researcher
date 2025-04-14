@@ -25,11 +25,11 @@ Choose between:
 
 Your output must be only one of the following:
 
-Academic Source
+{ response : Academic Source }
 
-General Web Search
+{ response : General Web Search}
 
-Code
+{ response : Code }
 
 Analyze the user's question and reply with the best option."""
 

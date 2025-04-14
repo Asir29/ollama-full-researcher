@@ -34,6 +34,9 @@ from langchain_core.prompts import ChatPromptTemplate
 
 import re
 
+import textwrap
+
+
 
 
 
@@ -70,10 +73,12 @@ async def route_question(state: SummaryState, config: RunnableConfig):
 
     print(f"Routing result: {result.content}")
 
+
+
     result_content = json.loads(result.content)
 
     # Extract the 'response' field from the result content (this is a hashable value)
-    response = result_content.get("option")
+    response = result_content.get("response")
 
     # Log the response to ensure it's being extracted correctly
     print(f"Response extracted: {response}")
@@ -87,7 +92,7 @@ async def route_question(state: SummaryState, config: RunnableConfig):
         return {"route": "General Web Search"}
     else:
         # Fallback to a default route
-        return {"route": "Code"}
+        return {"route": "General Web Search"}
 
 
 
@@ -157,10 +162,16 @@ async def academic_research(state, config, n=5):
     """Perform academic research using scholarly and extract abstracts of the first n publications"""
     abstracts = []
 
+    import unicodedata
+
+    # Normalize and encode-decode to ensure plain ASCII-safe string
+    query = unicodedata.normalize('NFKD', state.research_topic).encode('ascii', 'ignore').decode('ascii')
+
+
     try:
         # Search for the publications
         try:
-            search_results = scholarly.search_pubs(state.search_query) 
+            search_results = scholarly.search_pubs(query)
             if not search_results:
                 print("No search results found.")
                 return {"raw_search_results": []} 
@@ -393,11 +404,16 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState) ->
         print(f"Error during JSON parsing: {e}")
         return CodeOutput(prefix="", imports="", code="")
 
+    # Ensure that `code` is always a string, even if it is empty or None
+    code_str = str(parsed_response.get("code", ""))
+    # Ensure that `imports` is always a string, even if it is empty or None
+    #imports_str = str(parsed_response.get("imports", ""))
+
 
     return CodeOutput(
         prefix=parsed_response["prefix"],
         imports="\n".join(parsed_response["imports"]) if isinstance(parsed_response["imports"], list) else parsed_response["imports"],
-        code=parsed_response["code"]
+        code=code_str
     )
 
     """
@@ -456,7 +472,10 @@ def generate(state: SummaryState, config: RunnableConfig):
     messages += [
         (
             "assistant",
-            f"Here is my attempt to solve the problem: {code_solution.prefix} \n Imports: {code_solution.imports} \n Code: {code_solution.code}",
+            f"Here is my attempt to solve the problem:\n\n"
+            f"Prefix:\n{code_solution.prefix}\n\n"
+            f"Imports:\n```\n{textwrap.dedent(code_solution.imports)}\n```\n\n"
+            f"Code:\n```\n{textwrap.dedent(code_solution.code)}\n```"
         )
     ]
 
