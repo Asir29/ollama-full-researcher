@@ -11,7 +11,7 @@ from langgraph.graph import START, END, StateGraph
 from assistant.configuration import Configuration
 from assistant.utils import deduplicate_and_format_sources, format_sources
 from assistant.state import SummaryState, SummaryStateInput, SummaryStateOutput
-from assistant.prompts import query_writer_instructions, summarizer_instructions, reflection_instructions, web_search_instructions, web_search_description, web_search_expected_output, router_instructions, code_assistant_instructions
+from assistant.prompts import query_writer_instructions, summarizer_instructions, reflection_instructions, web_search_instructions, web_search_description, web_search_expected_output, router_instructions, code_assistant_instructions, academic_summarizer_instructions
 from copilotkit.langgraph import copilotkit_emit_message, copilotkit_exit, copilotkit_customize_config
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -96,6 +96,8 @@ async def route_question(state: SummaryState, config: RunnableConfig):
 
 
 
+############################################### WEB RESEARCH BRANCH ###############################################
+
 async def generate_query(state: SummaryState, config: RunnableConfig):
     """ Generate a query for web search """
     
@@ -153,47 +155,57 @@ async def web_research(state: SummaryState, config: RunnableConfig):
     return {"raw_search_result": content}
 
 
+async def summarize_sources(state: SummaryState, config: RunnableConfig):
+    """ Summarize the gathered sources """
+    
+    await copilotkit_emit_message(config, json.dumps({
+        "node": "Summarize Sources",
+        "content": "Summarizing gathered information..."
+    }))
+    
+    # Existing summary
+    existing_summary = state.running_summary
 
-import asyncio
-from scholarly import scholarly
-import os
+    # Most recent web research
+    most_recent_web_research = state.web_research_results[-1]
 
-async def academic_research(state, config, n=5):
-    """Perform academic research using scholarly and extract abstracts of the first n publications"""
-    abstracts = []
+    # Build the human message
+    if existing_summary:
+        human_message_content = (
+            f"Extend the existing summary: {existing_summary}\n\n"
+            f"Include new search results: {most_recent_web_research} "
+            f"That addresses the following topic: {state.research_topic}"
+        )
+    else:
+        human_message_content = (
+            f"Generate a summary of these search results: {most_recent_web_research} "
+            f"That addresses the following topic: {state.research_topic}"
+        )
 
-    import unicodedata
+    # Run the LLM
+    configurable = Configuration.from_runnable_config(config)
+    llm = ChatOllama(model=configurable.local_llm, temperature=0)
+    result = await llm.ainvoke(
+        [SystemMessage(content=summarizer_instructions),
+        HumanMessage(content=human_message_content)]
+    )
 
-    # Normalize and encode-decode to ensure plain ASCII-safe string
-    query = unicodedata.normalize('NFKD', state.research_topic).encode('ascii', 'ignore').decode('ascii')
+    running_summary = result.content
+
+    # TODO: This is a hack to remove the <think> tags w/ Deepseek models 
+    # It appears very challenging to prompt them out of the responses 
+    while "<think>" in running_summary and "</think>" in running_summary:
+        start = running_summary.find("<think>")
+        end = running_summary.find("</think>") + len("</think>")
+        running_summary = running_summary[:start] + running_summary[end:]
+
+    await copilotkit_emit_message(config, json.dumps({
+        "node": "Summarize Sources",
+        "content": running_summary
+    }))
+    return {"running_summary": running_summary}
 
 
-    try:
-        # Search for the publications
-        try:
-            search_results = scholarly.search_pubs(query)
-            if not search_results:
-                print("No search results found.")
-                return {"raw_search_results": []} 
-
-            # Loop through the first n results
-            for i, result in enumerate(search_results[:n]):
-                abstract = result.get("bib", {}).get("abstract", "No Abstract")
-                abstracts.append(abstract)
-                print(f"Abstract {i+1}: {abstract}")
-
-        except Exception as e:
-            print(f"Error during search_pubs: {e}")
-            return {"raw_search_results": []}
-
-        return {"raw_search_results": abstracts}
-
-    except Exception as e:
-        print(f"General error in academic_research: {e}")
-        return {"raw_search_results": []}
-
-    finally:
-        print("Exiting academic_research function.")
 
 
 
@@ -351,6 +363,85 @@ def route_research(state: SummaryState, config: RunnableConfig) -> Literal["fina
     #     structured_outputs=True
 
     # )   
+
+
+######################################## ACADEMIC RESEARCH BRANCH ############################################
+
+import asyncio
+from semanticscholar import SemanticScholar
+
+def academic_research(state, config, papers_limit=3):
+    """Perform academic research for the most relevant papers_limit papers."""
+    sch = SemanticScholar()
+
+    # Fetch results with limit=n (no async needed here)
+    try:
+        results = sch.search_paper(state.research_topic, limit=papers_limit)
+    except Exception as e:
+        print(f"Error fetching papers: {e}")
+        return {"academic_source_content": []}  # Return empty list on failure
+    
+    abstracts = []
+
+    # Iterate over the results and collect the abstracts
+    for paper in results:
+        abstracts.append(f"{paper.title} - {paper.abstract or 'No abstract'}")
+    
+    # Return the formatted content
+    return {"academic_source_content": abstracts}
+
+    
+
+    
+
+
+
+async def summarize_academic_sources(state: SummaryState, config: RunnableConfig):
+    """ Summarize the gathered sources from academic research """
+    await copilotkit_emit_message(config, json.dumps({
+        "node": "Summarize Academic Sources",
+        "content": "Summarizing gathered information..."
+    }))
+    
+    
+    
+    # Existing summary
+    content = state.academic_source_content
+
+
+    # Build the human message
+    if content:
+        human_message_content = (
+            f"Produce the summary of: {content}\n\n"
+        )
+    
+
+    # Run the LLM
+    configurable = Configuration.from_runnable_config(config)
+    llm = ChatOllama(model=configurable.local_llm, temperature=0)
+    result = await llm.ainvoke(
+        [SystemMessage(content=academic_summarizer_instructions),
+        HumanMessage(content=human_message_content)]
+    )
+
+    running_summary = result.content
+
+    # TODO: This is a hack to remove the <think> tags w/ Deepseek models 
+    # It appears very challenging to prompt them out of the responses 
+    while "<think>" in running_summary and "</think>" in running_summary:
+        start = running_summary.find("<think>")
+        end = running_summary.find("</think>") + len("</think>")
+        running_summary = running_summary[:start] + running_summary[end:]
+
+    await copilotkit_emit_message(config, json.dumps({
+        "node": "Summarize Sources",
+        "content": running_summary
+    }))
+    return {"running_summary": running_summary}
+
+
+########################################### CODE GENERATION BRANCH #############################################
+
 
 from langchain_core.pydantic_v1 import BaseModel, Field
 
@@ -588,7 +679,7 @@ def decide_to_finish(state: SummaryState):
         return "generate"
 
 
-
+####################################### GRAPH BUILDING #########################################
 # Add nodes and edges 
 
 
@@ -608,6 +699,8 @@ builder.add_node("json_parser", json_parser)
 
 # node for academic research
 builder.add_node("academic_research", academic_research)
+builder.add_node("summarize_academic_sources", summarize_academic_sources)
+
 
 # Add nodes for code generation and code checking
 builder.add_node("generate", generate)  # generation solution
@@ -630,8 +723,11 @@ builder.add_edge("web_research", "json_parser")
 builder.add_edge("json_parser", "summarize_sources")
 builder.add_edge("summarize_sources", "reflect_on_summary")
 builder.add_conditional_edges("reflect_on_summary", route_research)
-builder.add_edge("academic_research", END)
+
 builder.add_edge("finalize_summary", END)
+
+builder.add_edge("academic_research", "summarize_academic_sources")
+builder.add_edge("summarize_academic_sources", END)
 
 builder.add_edge("generate", "check_code")
 builder.add_conditional_edges(

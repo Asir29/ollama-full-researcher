@@ -65,6 +65,30 @@ CRITICAL REQUIREMENTS:
 - Begin directly with the summary text without any tags, prefixes, or meta-commentary
 """
 
+academic_summarizer_instructions = """Your goal is to generate a high-quality summary of the academic search results.
+
+When creating a NEW summary:
+1. Highlight the most relevant information from each source
+2. Provide a concise overview of the key points related to the report topic
+3. Emphasize significant findings or insights
+4. Ensure a coherent flow of information
+
+CRITICAL REQUIREMENTS:
+- Start IMMEDIATELY with the summary content - no introductions or meta-commentary
+- DO NOT include ANY of the following:
+  * Phrases about your thought process ("Let me start by...", "I should...", "I'll...")
+  * Explanations of what you're going to do
+  * Statements about understanding or analyzing the sources
+  * Mentions of summary extension or integration
+- Focus ONLY on factual, objective information
+- Maintain a consistent technical depth
+- Avoid redundancy and repetition
+- DO NOT use phrases like "based on the new results" or "according to additional sources"
+- DO NOT add a References or Works Cited section
+- DO NOT use any XML-style tags like <think> or <answer>
+- Begin directly with the summary text without any tags, prefixes, or meta-commentary
+"""
+
 reflection_instructions = """You are an expert research assistant analyzing a summary about {research_topic}.
 
 Your tasks:
