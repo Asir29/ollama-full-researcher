@@ -36,6 +36,8 @@ import re
 
 import textwrap
 
+from langgraph.types import Command
+
 
 
 
@@ -442,9 +444,11 @@ async def summarize_academic_sources(state: SummaryState, config: RunnableConfig
 
 ########################################### CODE GENERATION BRANCH #############################################
 
-
-from langchain_core.pydantic_v1 import BaseModel, Field
-
+from pydantic import BaseModel, Field
+#from langchain_core.pydantic_v1 import BaseModel, Field
+from typing import TypedDict, Literal
+from langgraph.types import interrupt
+from langgraph.checkpoint.memory import MemorySaver
 
 # Data model for the Code
 class CodeOutput(BaseModel):
@@ -507,34 +511,7 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState) ->
         code=code_str
     )
 
-    """
-    # llm to extract the three fields in the best way possible
-    agent = Agent(
-        model=Ollama(id="deepseek-r1"),
-        tools=[],
-        show_tool_calls=False,
-        structured_outputs=True,
-    )
 
-    
-    query = code_parser_instructions + "\n Extract only the three fields from the following: " + response_text + "\n"
-    
-    try:
-        parsed_response = agent.run(query)
-    except Exception as e:
-        print(f"Error during parsing: {e}")
-        return CodeOutput(prefix="", imports="", code="")
-
-    print("PARSED RESPONSE:\n", repr(parsed_response))
-
-
-    return CodeOutput(
-        prefix=parsed_response["prefix"],
-        imports="\n".join(parsed_response["imports"]) if isinstance(parsed_response["imports"], list) else parsed_response["imports"],
-        code=parsed_response["code"]
-    )
-
-    """
 
 
 ## Function to generate code
@@ -567,12 +544,18 @@ def generate(state: SummaryState, config: RunnableConfig):
             f"Prefix:\n{code_solution.prefix}\n\n"
             f"Imports:\n```\n{textwrap.dedent(code_solution.imports)}\n```\n\n"
             f"Code:\n```\n{textwrap.dedent(code_solution.code)}\n```"
+           
         )
     ]
 
+    
+    state.code_generation = code_solution
+    state.messages = messages
+
+
     # Increment
     state.code_iterations = state.code_iterations + 1
-    return {"code_generation": code_solution, "messages": messages, "code_iterations": state.code_iterations}
+    return {"code_generation": code_solution, "messages": messages, "code_iterations": state.code_iterations} #, "user_feedback": state.user_feedback
 
 
 def code_check(state: SummaryState):
@@ -679,6 +662,130 @@ def decide_to_finish(state: SummaryState):
         return "generate"
 
 
+async def collect_feedback(state: SummaryState, config: RunnableConfig):
+    print("---COLLECTING FEEDBACK FROM USER---")
+
+    feedback_prompt = {
+        "instruction": "Please review the code and choose: approve, regenerate, or modify. Then explain your decision.",
+        "code_review": {
+            "prefix": state.code_generation.prefix,
+            "imports": state.code_generation.imports,
+            "code": state.code_generation.code,
+        }
+    }
+
+    state.user_feedback = await interrupt(feedback_prompt)  # 👈 async required!
+    print(f"STATE AFTER USER FEEDBACK: {state}")
+    return {"user_feedback": state.user_feedback}
+
+
+
+
+
+def process_feedback(state: SummaryState, config: RunnableConfig):
+    """Process the user feedback and classify next action."""
+    print("---PROCESSING FEEDBACK DECISION---")
+
+    
+
+    agent = Agent(
+        model=Ollama(id="deepseek-r1"),
+        tools=[],
+        show_tool_calls=False,
+        structured_outputs=True,
+    )
+
+    prompt = (
+        "You are a decision agent. Given user feedback, return ONLY one of:\n"
+        '{ "response": "regenerate" }\n'
+        '{ "response": "modify" }\n'
+        '{ "response": "approve" }\n'
+        "No explanations or extra text.\n\n"
+        f"Feedback:\n{state.user_feedback}"
+    )
+
+    try:
+        response = agent.run(prompt)
+        response_text = getattr(response, "content", str(response))
+        print(f"RAW DECISION RESPONSE: {response_text}")
+
+        parsed = json.loads(response_text)
+        action = parsed.get("response", "regenerate").lower()
+
+        if action not in {"regenerate", "modify", "approve"}:
+            action = "regenerate"
+
+    except Exception as e:
+        print(f"Error parsing feedback response: {e}")
+        action = "regenerate"
+
+    state.user_feedback_processed = action
+    return {"user_feedback_processed": action}
+
+
+def modify_code(state: SummaryState, config: RunnableConfig):
+    """
+    Allow the user to edit the code directly.
+    """
+    print("---MODIFYING CODE---")
+
+    agent = Agent(
+        model=Ollama(id="codellama"),
+        tools=[],
+        show_tool_calls=False,
+        structured_outputs=True,
+    )
+
+    current_code = state.code_generation
+
+    # Construct the query using f-strings for better readability
+    query = f"Rewrite the code with the user feedback: {state.user_feedback}\n{current_code}"
+
+    response = agent.run(query)
+
+    # Parse the response into a dictionary
+    try:
+        parsed_response = json.loads(response)
+    except json.JSONDecodeError as e:
+        # Log the error instead of printing directly
+        logging.error(f"Error during JSON parsing: {e}")
+        return CodeOutput(prefix="", imports="", code="")
+
+    # Extract the updated code and ensure it is a string
+    updated_code = str(parsed_response.get("code", ""))
+
+    # Update the state with the new code
+    state.code_generation = updated_code
+
+    # Return the updated code and relevant state information
+    return {
+        "code_generation": updated_code,
+        "messages": state.messages,
+        "code_iterations": state.code_iterations,
+        "user_feedback": state.user_feedback,
+    }
+
+
+
+# not used
+def continue_generation(state: SummaryState, config: RunnableConfig):
+    """
+    Continue the generation from where it left off.
+    """
+    print("---CONTINUING CODE GENERATION---")
+
+    continued_code = continue_code_generation(state.code_generation.code, config, state)
+
+    state.code_generation.code += "\n" + continued_code
+    state.messages.append(("assistant", f"Continuing code generation:\n```\n{continued_code}\n```"))
+
+    return {
+        "code_generation": state.code_generation,
+        "messages": state.messages
+    }
+
+
+
 ####################################### GRAPH BUILDING #########################################
 # Add nodes and edges 
 
@@ -704,7 +811,11 @@ builder.add_node("summarize_academic_sources", summarize_academic_sources)
 
 # Add nodes for code generation and code checking
 builder.add_node("generate", generate)  # generation solution
-builder.add_node("check_code", code_check)  # check code
+#builder.add_node("check_code", code_check)  # check code
+builder.add_node("modify_code", modify_code)
+#builder.add_node("continue_generation", continue_generation)
+builder.add_node("collect_feedback", collect_feedback)
+builder.add_node("process_feedback", process_feedback)
 
 # Add edges
 builder.add_edge(START, "route_question")
@@ -729,15 +840,44 @@ builder.add_edge("finalize_summary", END)
 builder.add_edge("academic_research", "summarize_academic_sources")
 builder.add_edge("summarize_academic_sources", END)
 
-builder.add_edge("generate", "check_code")
+#builder.add_edge("generate", "check_code")
+builder.add_edge("generate", "collect_feedback")
+
+builder.add_edge("collect_feedback", "process_feedback")
+
 builder.add_conditional_edges(
-    "check_code",
-    decide_to_finish,
+    "process_feedback",
+    lambda state: state.user_feedback_processed,
     {
-        "end": END,
-        "generate": "generate",
+        "regenerate": "generate",
+        "modify": "modify_code",
+        "approve": END,
     },
 )
+
+
+"""
+builder.add_conditional_edges(
+    "human_approval",
+    lambda state: state.user_feedback_processed,
+    {
+        "regenerate": "generate",
+        "end": END,
+        "modify": "modify_code",
+        
+    },
+)
+"""
+
+
+#builder.add_conditional_edges(
+#    "check_code",
+#    decide_to_finish,
+#    {
+#        "end": END,
+#        "generate": "generate",
+#    },
+#)
 
 
 # Add memory saver for checkpointing
@@ -745,6 +885,7 @@ memory = MemorySaver()
 
 # Compile graph with checkpointing and interrupts
 graph = builder.compile(
-#    checkpointer=memory
+
+#interrupt_after=[""],
 )
 

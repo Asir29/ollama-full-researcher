@@ -28,6 +28,8 @@ class SummaryState:
     code_generation: str = field(default=None)
     error: str = field(default=None)
     messages: Annotated[list[AnyMessage], add_messages]
+    user_feedback: str = field(default=None) # to store user feedback
+    user_feedback_processed : str = field(default=None) # to store user feedback after llm processes it
 
 
 
