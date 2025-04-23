@@ -1,6 +1,13 @@
 import json
 import logging
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(method)s %(path)s %(status)s",  # Customize the format
+)
+
+logging.getLogger("langgraph_api.server").setLevel(logging.WARNING)
+
 from typing_extensions import Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
@@ -13,7 +20,6 @@ from assistant.utils import deduplicate_and_format_sources, format_sources
 from assistant.state import SummaryState, SummaryStateInput, SummaryStateOutput
 from assistant.prompts import query_writer_instructions, summarizer_instructions, reflection_instructions, web_search_instructions, web_search_description, web_search_expected_output, router_instructions, code_assistant_instructions, academic_summarizer_instructions
 from copilotkit.langgraph import copilotkit_emit_message, copilotkit_exit, copilotkit_customize_config
-from langgraph.checkpoint.memory import MemorySaver
 
 from agno.agent import Agent
 from agno.tools.googlesearch import GoogleSearchTools
@@ -38,10 +44,11 @@ import textwrap
 
 from langgraph.types import Command
 
-
-
-
-
+from pydantic import BaseModel, Field
+#from langchain_core.pydantic_v1 import BaseModel, Field
+from typing import TypedDict, Literal
+from langgraph.types import interrupt
+from langgraph.checkpoint.memory import MemorySaver
 
 
 # Set up logging
@@ -70,7 +77,7 @@ async def route_question(state: SummaryState, config: RunnableConfig):
     # Send system and human messages
     result = await llm_json_mode.ainvoke([ 
         SystemMessage(content=router_instructions),
-        HumanMessage(content=f"Research Topic: {state.research_topic}")
+        HumanMessage(content=f"Input: {state.research_topic}")
     ])
 
     print(f"Routing result: {result.content}")
@@ -444,11 +451,9 @@ async def summarize_academic_sources(state: SummaryState, config: RunnableConfig
 
 ########################################### CODE GENERATION BRANCH #############################################
 
-from pydantic import BaseModel, Field
-#from langchain_core.pydantic_v1 import BaseModel, Field
-from typing import TypedDict, Literal
-from langgraph.types import interrupt
-from langgraph.checkpoint.memory import MemorySaver
+
+
+
 
 # Data model for the Code
 class CodeOutput(BaseModel):
@@ -662,7 +667,7 @@ def decide_to_finish(state: SummaryState):
         return "generate"
 
 
-async def collect_feedback(state: SummaryState, config: RunnableConfig):
+def collect_feedback(state: SummaryState, config: RunnableConfig):
     print("---COLLECTING FEEDBACK FROM USER---")
 
     feedback_prompt = {
@@ -674,9 +679,7 @@ async def collect_feedback(state: SummaryState, config: RunnableConfig):
         }
     }
 
-    state.user_feedback = await interrupt(feedback_prompt)  # 👈 async required!
-    print(f"STATE AFTER USER FEEDBACK: {state}")
-    return {"user_feedback": state.user_feedback}
+    interrupt(feedback_prompt)
 
 
 
@@ -686,7 +689,7 @@ def process_feedback(state: SummaryState, config: RunnableConfig):
     """Process the user feedback and classify next action."""
     print("---PROCESSING FEEDBACK DECISION---")
 
-    
+    print("\nstate in process feedback:", state)
 
     agent = Agent(
         model=Ollama(id="deepseek-r1"),
@@ -695,19 +698,31 @@ def process_feedback(state: SummaryState, config: RunnableConfig):
         structured_outputs=True,
     )
 
-    prompt = (
-        "You are a decision agent. Given user feedback, return ONLY one of:\n"
-        '{ "response": "regenerate" }\n'
-        '{ "response": "modify" }\n'
-        '{ "response": "approve" }\n'
-        "No explanations or extra text.\n\n"
-        f"Feedback:\n{state.user_feedback}"
-    )
+    prompt = f"""\
+    You are a decision agent.\n
+    You receive the user feedback: {state.research_topic}.\n
+    Based on that, respond with one of the following exact JSON objects:\n\n
+    {{"response": "approve"}}\n
+    {{"response": "modify"}}\n
+    {{"response": "regenerate"}}\n\n
+    Only return the JSON. Do not include any other text, logs, or thoughts."""
+
+    
+
 
     try:
         response = agent.run(prompt)
         response_text = getattr(response, "content", str(response))
         print(f"RAW DECISION RESPONSE: {response_text}")
+
+        # TODO: This is a hack to remove the <think> tags w/ Deepseek models 
+        # It appears very challenging to prompt them out of the responses 
+        while "<think>" in response_text and "</think>" in response_text:
+            start = response_text.find("<think>")
+            end = response_text.find("</think>") + len("</think>")
+            response_text = response_text[:start] + response_text[end:]
+
+        print(f"RESPONSE TEXT: {response_text}")
 
         parsed = json.loads(response_text)
         action = parsed.get("response", "regenerate").lower()
@@ -843,6 +858,8 @@ builder.add_edge("summarize_academic_sources", END)
 #builder.add_edge("generate", "check_code")
 builder.add_edge("generate", "collect_feedback")
 
+builder.add_edge("modify_code", "collect_feedback")
+
 builder.add_edge("collect_feedback", "process_feedback")
 
 builder.add_conditional_edges(
@@ -885,7 +902,7 @@ memory = MemorySaver()
 
 # Compile graph with checkpointing and interrupts
 graph = builder.compile(
-
+#checkpointer=memory,
 #interrupt_after=[""],
 )
 
