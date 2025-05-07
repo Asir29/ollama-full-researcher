@@ -379,25 +379,50 @@ def route_research(state: SummaryState, config: RunnableConfig) -> Literal["fina
 import asyncio
 from semanticscholar import SemanticScholar
 
-def academic_research(state, config, papers_limit=3):
-    """Perform academic research for the most relevant papers_limit papers."""
+async def generate_academic_query(state: SummaryState, config: RunnableConfig):
+    """ Generate a query for academic search """
+    
+    # Format the prompt
+    print(f"Current state: {state}")
+    query_writer_instructions_formatted = query_writer_instructions.format(research_topic=state.research_topic)
+
+    # Generate a query
+    configurable = Configuration.from_runnable_config(config)
+    llm_json_mode = ChatOllama(model=configurable.local_llm, temperature=0, format="json")
+    result = await llm_json_mode.ainvoke(
+        [SystemMessage(content=query_writer_instructions_formatted),
+        HumanMessage(content=f"Generate a query for web search:")]
+    )   
+    query = json.loads(result.content)
+    
+    await copilotkit_emit_message(config, json.dumps({
+        "node": "Generate Query",
+        "content": query['query']
+    }))
+    return {"search_query": query['query']}
+
+import asyncio
+
+
+async def academic_research(state, config, papers_limit=3):
+    """Perform academic research for the most relevant papers."""
     sch = SemanticScholar()
 
-    # Fetch results with limit=n (no async needed here)
     try:
-        results = sch.search_paper(state.research_topic, limit=papers_limit)
+        # Run sync method in background thread
+        results = await asyncio.to_thread(sch.search_paper, state.search_query, limit=papers_limit)
     except Exception as e:
         print(f"Error fetching papers: {e}")
-        return {"academic_source_content": []}  # Return empty list on failure
+        return {"academic_source_content": []}
     
-    abstracts = []
+    abstracts = [
+        f"{paper.title} - {paper.abstract or 'No abstract'}"
+        for paper in results
+    ]
 
-    # Iterate over the results and collect the abstracts
-    for paper in results:
-        abstracts.append(f"{paper.title} - {paper.abstract or 'No abstract'}")
-    
-    # Return the formatted content
     return {"academic_source_content": abstracts}
+
+
 
     
 
@@ -406,6 +431,8 @@ def academic_research(state, config, papers_limit=3):
 
 
 async def summarize_academic_sources(state: SummaryState, config: RunnableConfig):
+
+    print("IN SUMMARIZE ACADEMIC RESEARCH")
     """ Summarize the gathered sources from academic research """
     await copilotkit_emit_message(config, json.dumps({
         "node": "Summarize Academic Sources",
@@ -416,6 +443,7 @@ async def summarize_academic_sources(state: SummaryState, config: RunnableConfig
     
     # Existing summary
     content = state.academic_source_content
+    
 
 
     # Build the human message
@@ -423,6 +451,8 @@ async def summarize_academic_sources(state: SummaryState, config: RunnableConfig
         human_message_content = (
             f"Produce the summary of: {content}\n\n"
         )
+    else:
+        human_message_content = "empty"
     
 
     # Run the LLM
@@ -532,6 +562,7 @@ def generate(state: SummaryState, config: RunnableConfig):
     """
 
     print("---GENERATING CODE SOLUTION---")
+    print(f"Current state: {state}")
 
     # State
     messages = state.messages
@@ -643,7 +674,98 @@ def code_check(state: SummaryState):
     }
 
 
+from e2b_code_interpreter import Sandbox
 
+from openevals.code.e2b.pyright import create_e2b_pyright_evaluator
+
+from openevals.code.e2b.execution import create_e2b_execution_evaluator
+
+
+
+def check_code_sandbox(state: SummaryState, config: RunnableConfig):
+    """
+    Check code in a sandbox
+    """
+
+    # E2B template with uv and pyright preinstalled
+    sandbox = Sandbox("OpenEvalsPython")
+
+    # Create the evaluator
+    evaluator = create_e2b_pyright_evaluator(
+    sandbox=sandbox,
+    )
+
+    imports = state.code_generation.imports
+    code = state.code_generation.code
+
+    # Combine imports and code
+    combined_code = f"{imports}\n{code}"
+
+    eval_result_pyright = evaluator(outputs=combined_code)
+
+    print(eval_result_pyright)
+
+
+    evaluator = create_e2b_execution_evaluator(
+    sandbox=sandbox,
+    )
+
+    eval_result_execution = evaluator(outputs=combined_code)
+
+    print(eval_result_execution)
+
+    return { 
+        "sandbox_feedback_pyright": eval_result_pyright,
+        "sandbox_feedback_execution": eval_result_execution
+    }
+
+
+reflection_instructions = """\
+    You are a code reflection agent. Your task is to reflect on the code and decide whether to finish or retry.
+    You will receive the following information:
+    1. The code generated.
+    2. The feedbacks from the code checker.
+    You have to produce a query for the code generator that makes clear what must be modified and the entire code solution must be reported.
+    The output should be a JSON object with the following fields:
+    {
+        "response": "The errors indicate that ..., so change the following code to fix them: ..."
+    }
+    Consider to report the code as it is since the code generation agent will take care of modifying it.
+    """
+
+def reflection(state: SummaryState, config: RunnableConfig):
+    """
+    Reflect on the code and decide whether to finish or retry.
+    """
+
+    print("---REFLECTING ON CODE---")
+
+    # Check code
+    pyright_feedback = state.sandbox_feedback_pyright
+    execution_feedback = state.sandbox_feedback_execution
+    print("PYRIGHT FEEDBACK:", pyright_feedback)
+
+    if(pyright_feedback['key'] == "pyright_succeeded" and execution_feedback['key'] == "execution_succeeded"):
+        print("---NO ERRORS---")
+        return {"route": "no_errors"}  # Return a dictionary
+    
+    agent = Agent(
+        model=Ollama(id="mistral-nemo"),
+        tools=[],
+        show_tool_calls=False,
+        structured_outputs=True,
+    )
+
+    # Construct the query using f-strings for better readability
+    query = reflection_instructions + "\n" + state.code_generation.code + "\n" + pyright_feedback + "\n" + execution_feedback
+    response = agent.run(query)
+    print("REFLECTION RESPONSE:", response)
+    # Parse the response into a dictionary
+    parsed_response = json.loads(response)
+    
+    state.research_topic = parsed_response
+
+    return {"route": "regenerate"}  # Return a dictionary
 
 
 def decide_to_finish(state: SummaryState):
@@ -822,6 +944,7 @@ builder.add_node("json_parser", json_parser)
 # node for academic research
 builder.add_node("academic_research", academic_research)
 builder.add_node("summarize_academic_sources", summarize_academic_sources)
+builder.add_node("generate_academic_query", generate_academic_query)
 
 
 # Add nodes for code generation and code checking
@@ -831,6 +954,8 @@ builder.add_node("modify_code", modify_code)
 #builder.add_node("continue_generation", continue_generation)
 builder.add_node("collect_feedback", collect_feedback)
 builder.add_node("process_feedback", process_feedback)
+builder.add_node("check_code_sandbox", check_code_sandbox)  # check code in sandbox
+builder.add_node("reflection", reflection)  # reflect on code
 
 # Add edges
 builder.add_edge(START, "route_question")
@@ -839,7 +964,7 @@ builder.add_conditional_edges(
     "route_question",
     lambda state: state.route,  # Read route from state
     {
-        "Academic Source": "academic_research",
+        "Academic Source": "generate_academic_query",
         "General Web Search": "generate_query",
         "Code": "generate",
     }
@@ -852,11 +977,24 @@ builder.add_conditional_edges("reflect_on_summary", route_research)
 
 builder.add_edge("finalize_summary", END)
 
+builder.add_edge("generate_academic_query", "academic_research")
 builder.add_edge("academic_research", "summarize_academic_sources")
 builder.add_edge("summarize_academic_sources", END)
 
-#builder.add_edge("generate", "check_code")
-builder.add_edge("generate", "collect_feedback")
+builder.add_edge("generate", "check_code_sandbox")
+#builder.add_edge("generate", "collect_feedback")
+
+builder.add_edge("check_code_sandbox", "reflection")
+
+builder.add_conditional_edges(
+    "reflection",
+    lambda state: state.route,
+    {
+        "no_errors": "collect_feedback",
+        "regenerate": "generate",
+        
+    },
+)
 
 builder.add_edge("modify_code", "collect_feedback")
 
@@ -867,34 +1005,12 @@ builder.add_conditional_edges(
     lambda state: state.user_feedback_processed,
     {
         "regenerate": "generate",
-        "modify": "modify_code",
         "approve": END,
     },
 )
 
 
-"""
-builder.add_conditional_edges(
-    "human_approval",
-    lambda state: state.user_feedback_processed,
-    {
-        "regenerate": "generate",
-        "end": END,
-        "modify": "modify_code",
-        
-    },
-)
-"""
 
-
-#builder.add_conditional_edges(
-#    "check_code",
-#    decide_to_finish,
-#    {
-#        "end": END,
-#        "generate": "generate",
-#    },
-#)
 
 
 # Add memory saver for checkpointing

@@ -10,3 +10,4 @@ src/assistant/__pycache__/graph.cpython-311.pyc
 src/assistant/__pycache__/prompts.cpython-311.pyc
 src/assistant/__pycache__/state.cpython-311.pyc
 src/assistant/__pycache__/utils.cpython-311.pyc
+.env
