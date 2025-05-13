@@ -720,17 +720,10 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
     }
 
 
-reflection_instructions = """\
-    You are a code reflection agent. Your task is to reflect on the code and decide whether to finish or retry.
-    You will receive the following information:
-    1. The code generated.
-    2. The feedbacks from the code checker.
-    You have to produce a query for the code generator that makes clear what must be modified and the entire code solution must be reported.
-    The output should be a JSON object with the following fields:
-    {
-        "response": "The errors indicate that ..., so change the following code to fix them: ..."
-    }
-    Consider to report the code as it is since the code generation agent will take care of modifying it.
+code_reflection_instructions = """\
+    You are a code reflection agent. Your task is to reflect on the results of the checker and give the user suggestions to fix them.
+    Also, you ask to the user how you can be useful.
+    The results of the checker are the following:
     """
 
 def reflection(state: SummaryState, config: RunnableConfig):
@@ -745,9 +738,9 @@ def reflection(state: SummaryState, config: RunnableConfig):
     execution_feedback = state.sandbox_feedback_execution
     print("PYRIGHT FEEDBACK:", pyright_feedback)
 
-    if(pyright_feedback['key'] == "pyright_succeeded" and execution_feedback['key'] == "execution_succeeded"):
-        print("---NO ERRORS---")
-        return {"route": "no_errors"}  # Return a dictionary
+    #if(pyright_feedback['key'] == "pyright_succeeded" and execution_feedback['key'] == "execution_succeeded"):
+    #    print("---NO ERRORS---")
+    #    return {"route": "no_errors"}  # Return a dictionary
     
     agent = Agent(
         model=Ollama(id="mistral-nemo"),
@@ -756,16 +749,30 @@ def reflection(state: SummaryState, config: RunnableConfig):
         structured_outputs=True,
     )
 
-    # Construct the query using f-strings for better readability
-    query = reflection_instructions + "\n" + state.code_generation.code + "\n" + pyright_feedback + "\n" + execution_feedback
-    response = agent.run(query)
-    print("REFLECTION RESPONSE:", response)
-    # Parse the response into a dictionary
-    parsed_response = json.loads(response)
-    
-    state.research_topic = parsed_response
+    # Convert dictionaries to strings
+    pyright_feedback_str = json.dumps(pyright_feedback, indent=2)
+    execution_feedback_str = json.dumps(execution_feedback, indent=2)
 
-    return {"route": "regenerate"}  # Return a dictionary
+    # Construct the query using f-strings for better readability
+    query = code_reflection_instructions + "\n" + pyright_feedback_str + "\n" + execution_feedback_str
+    response = agent.run(query)
+
+    # Get the string content from RunResponse
+    response_content = response.content if hasattr(response, 'content') else str(response)
+    print("REFLECTION RESPONSE:", response_content)
+
+
+    # Store response in a variable
+    code_reflection = response_content
+
+    code_reflection = "Few checks on the generated code...\n" + code_reflection
+
+    
+
+    return {
+        "code_reflection": code_reflection,
+        
+    }
 
 
 def decide_to_finish(state: SummaryState):
@@ -986,15 +993,7 @@ builder.add_edge("generate", "check_code_sandbox")
 
 builder.add_edge("check_code_sandbox", "reflection")
 
-builder.add_conditional_edges(
-    "reflection",
-    lambda state: state.route,
-    {
-        "no_errors": "collect_feedback",
-        "regenerate": "generate",
-        
-    },
-)
+builder.add_edge("reflection", "collect_feedback")
 
 builder.add_edge("modify_code", "collect_feedback")
 
