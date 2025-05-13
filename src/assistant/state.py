@@ -30,7 +30,11 @@ class SummaryState:
     # Code generation
     code_iterations: int = field(default=0)
     max_code_iterations: int = field(default=3)
-    code_generation: str = field(default=None)
+    
+    code_generation: str = field(default="Empty") # CodeOutput 
+    code: str = field(default="Empty") # only the code, used by the generator to access previous code
+
+
     error: str = field(default=None)
     messages: Annotated[list[AnyMessage], add_messages]
     user_feedback: str = field(default=None) # to store user feedback

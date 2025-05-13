@@ -166,4 +166,7 @@ code_assistant_instructions = """ \
     You MUST avoid to include any new lines or special characters outside the brackets of the JSON object.
     The response MUST contain only the fields specified in the JSON format.
     \n Here is the user question:
-    {question}"""
+    {question}
+    
+
+    """

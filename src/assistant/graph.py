@@ -519,7 +519,7 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState) ->
     )
 
     
-    query = code_assistant_instructions + "\n Satisfy the following instructions: " + state.research_topic + "\n"
+    query = code_assistant_instructions + "\n Satisfy the following instructions: " + state.research_topic + "\n" + "If the question is a request related to the previusly generated code, consider it when producing the response. In the following the previously generated code: " + state.code
     response = agent.run(query)  
 
 
@@ -584,14 +584,16 @@ def generate(state: SummaryState, config: RunnableConfig):
         )
     ]
 
+    print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+    print(type(code_solution.code))
     
-    state.code_generation = code_solution
-    state.messages = messages
+    #state.code_generation = code_solution.code
+    #state.messages = messages
 
 
     # Increment
     state.code_iterations = state.code_iterations + 1
-    return {"code_generation": code_solution, "messages": messages, "code_iterations": state.code_iterations} #, "user_feedback": state.user_feedback
+    return {"code_generation": code_solution, "code":code_solution.code, "messages": messages, "code_iterations": state.code_iterations} #, "user_feedback": state.user_feedback
 
 
 def code_check(state: SummaryState):
@@ -765,7 +767,7 @@ def reflection(state: SummaryState, config: RunnableConfig):
     # Store response in a variable
     code_reflection = response_content
 
-    code_reflection = "Few checks on the generated code...\n" + code_reflection
+    code_reflection = "Few checks on the generated code" + code_reflection
 
     
 
@@ -800,7 +802,7 @@ def collect_feedback(state: SummaryState, config: RunnableConfig):
     print("---COLLECTING FEEDBACK FROM USER---")
 
     feedback_prompt = {
-        "instruction": "Please review the code and choose: approve, regenerate, or modify. Then explain your decision.",
+        "instruction": "Please review the code and choose: approve, regenerate. Then explain your decision.",
         "code_review": {
             "prefix": state.code_generation.prefix,
             "imports": state.code_generation.imports,
@@ -832,8 +834,9 @@ def process_feedback(state: SummaryState, config: RunnableConfig):
     You receive the user feedback: {state.research_topic}.\n
     Based on that, respond with one of the following exact JSON objects:\n\n
     {{"response": "approve"}}\n
-    {{"response": "modify"}}\n
     {{"response": "regenerate"}}\n\n
+    In particular, approve means that the user is satisfied with the code and wants to finish.\n
+    Regenerate means that the user wants to regenerate the code with some modifications.\n
     Only return the JSON. Do not include any other text, logs, or thoughts."""
 
     
@@ -856,7 +859,7 @@ def process_feedback(state: SummaryState, config: RunnableConfig):
         parsed = json.loads(response_text)
         action = parsed.get("response", "regenerate").lower()
 
-        if action not in {"regenerate", "modify", "approve"}:
+        if action not in {"regenerate", "approve"}:
             action = "regenerate"
 
     except Exception as e:
@@ -867,47 +870,7 @@ def process_feedback(state: SummaryState, config: RunnableConfig):
     return {"user_feedback_processed": action}
 
 
-def modify_code(state: SummaryState, config: RunnableConfig):
-    """
-    Allow the user to edit the code directly.
-    """
-    print("---MODIFYING CODE---")
 
-    agent = Agent(
-        model=Ollama(id="codellama"),
-        tools=[],
-        show_tool_calls=False,
-        structured_outputs=True,
-    )
-
-    current_code = state.code_generation
-
-    # Construct the query using f-strings for better readability
-    query = f"Rewrite the code with the user feedback: {state.user_feedback}\n{current_code}"
-
-    response = agent.run(query)
-
-    # Parse the response into a dictionary
-    try:
-        parsed_response = json.loads(response)
-    except json.JSONDecodeError as e:
-        # Log the error instead of printing directly
-        logging.error(f"Error during JSON parsing: {e}")
-        return CodeOutput(prefix="", imports="", code="")
-
-    # Extract the updated code and ensure it is a string
-    updated_code = str(parsed_response.get("code", ""))
-
-    # Update the state with the new code
-    state.code_generation = updated_code
-
-    # Return the updated code and relevant state information
-    return {
-        "code_generation": updated_code,
-        "messages": state.messages,
-        "code_iterations": state.code_iterations,
-        "user_feedback": state.user_feedback,
-    }
 
 
 
@@ -957,7 +920,6 @@ builder.add_node("generate_academic_query", generate_academic_query)
 # Add nodes for code generation and code checking
 builder.add_node("generate", generate)  # generation solution
 #builder.add_node("check_code", code_check)  # check code
-builder.add_node("modify_code", modify_code)
 #builder.add_node("continue_generation", continue_generation)
 builder.add_node("collect_feedback", collect_feedback)
 builder.add_node("process_feedback", process_feedback)
@@ -995,7 +957,6 @@ builder.add_edge("check_code_sandbox", "reflection")
 
 builder.add_edge("reflection", "collect_feedback")
 
-builder.add_edge("modify_code", "collect_feedback")
 
 builder.add_edge("collect_feedback", "process_feedback")
 
