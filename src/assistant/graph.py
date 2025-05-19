@@ -18,7 +18,7 @@ from langgraph.graph import START, END, StateGraph
 from assistant.configuration import Configuration
 from assistant.utils import deduplicate_and_format_sources, format_sources
 from assistant.state import SummaryState, SummaryStateInput, SummaryStateOutput
-from assistant.prompts import query_writer_instructions, summarizer_instructions, reflection_instructions, web_search_instructions, web_search_description, web_search_expected_output, router_instructions, code_assistant_instructions, academic_summarizer_instructions
+from assistant.prompts import query_writer_instructions, summarizer_instructions, reflection_instructions, web_search_instructions, web_search_description, web_search_expected_output, router_instructions, code_assistant_instructions, academic_summarizer_instructions, code_reflection_instructions
 from copilotkit.langgraph import copilotkit_emit_message, copilotkit_exit, copilotkit_customize_config
 
 from agno.agent import Agent
@@ -378,6 +378,7 @@ def route_research(state: SummaryState, config: RunnableConfig) -> Literal["fina
 
 import asyncio
 from semanticscholar import SemanticScholar
+import asyncio
 
 async def generate_academic_query(state: SummaryState, config: RunnableConfig):
     """ Generate a query for academic search """
@@ -401,7 +402,7 @@ async def generate_academic_query(state: SummaryState, config: RunnableConfig):
     }))
     return {"search_query": query['query']}
 
-import asyncio
+
 
 
 async def academic_research(state, config, papers_limit=3):
@@ -481,7 +482,11 @@ async def summarize_academic_sources(state: SummaryState, config: RunnableConfig
 
 ########################################### CODE GENERATION BRANCH #############################################
 
+from e2b_code_interpreter import Sandbox
 
+from openevals.code.e2b.pyright import create_e2b_pyright_evaluator
+
+from openevals.code.e2b.execution import create_e2b_execution_evaluator
 
 
 
@@ -507,6 +512,9 @@ code_parser_instructions = """\
 
 # Function to generate code, called by the node "generate"
 def generate_code(question: str, config: RunnableConfig, state: SummaryState) -> CodeOutput:
+    """
+    Use the vectorstore retriever to generate code based on the user's query.
+    """
     messages = [question]
 
     configurable = Configuration.from_runnable_config(config)
@@ -518,8 +526,41 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState) ->
         structured_outputs=True,
     )
 
+    # create the embedding
+    # Load the URLs
+    urls = state.urls
+
+    # Parse the JSON string
+    data = json.loads(urls)
+
+    # Extract the URLs into a Python list
+    urls = data["urls"]
+
+    print(f"URLs: {urls}")    
+
+    docs = [WebBaseLoader(url).load() for url in urls] # Load the documents
+    docs_list = [item for sublist in docs for item in sublist] # Flatten the list
+
+    text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder( # Split the documents in chunks of 250 characters 
+        chunk_size=250, chunk_overlap=0 
+    )
+    doc_splits = text_splitter.split_documents(docs_list)
+
+    # Add to vectorDB
+    vectorstore = Chroma.from_documents( # Add the documents to the vectorstore, using the NomicEmbeddings model
+        documents=doc_splits,
+        collection_name="rag-chroma",
+        embedding=NomicEmbeddings(model="nomic-embed-text-v1.5", inference_mode="local"),
+    )
+    retriever = vectorstore.as_retriever() # Create a retriever from the vectorstore, to retrieve the most similar documents
+
+    # Retrieve relevant documents
+    relevant_docs = retriever.get_relevant_documents(state.research_topic) # Retrieve the most relevant documents based on the query
+    context = "\n\n".join([doc.page_content for doc in relevant_docs])
+
+    print("CONTEXT:", context)
     
-    query = code_assistant_instructions + "\n Satisfy the following instructions: " + state.research_topic + "\n" + "If the question is a request related to the previusly generated code, consider it when producing the response. In the following the previously generated code: " + state.code
+    query = code_assistant_instructions + "\n Satisfy the following instructions: " + state.research_topic + "\n" + "If the question is a request related to the previusly generated code, consider it when producing the response. In the following the previously generated code: " + state.imports + state.code
     response = agent.run(query)  
 
 
@@ -593,7 +634,7 @@ def generate(state: SummaryState, config: RunnableConfig):
 
     # Increment
     state.code_iterations = state.code_iterations + 1
-    return {"code_generation": code_solution, "code":code_solution.code, "messages": messages, "code_iterations": state.code_iterations} #, "user_feedback": state.user_feedback
+    return {"code_generation": code_solution, "code":code_solution.code, "imports":code_solution.imports, "messages": messages, "code_iterations": state.code_iterations} #, "user_feedback": state.user_feedback
 
 
 def code_check(state: SummaryState):
@@ -676,11 +717,7 @@ def code_check(state: SummaryState):
     }
 
 
-from e2b_code_interpreter import Sandbox
 
-from openevals.code.e2b.pyright import create_e2b_pyright_evaluator
-
-from openevals.code.e2b.execution import create_e2b_execution_evaluator
 
 
 
@@ -722,11 +759,7 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
     }
 
 
-code_reflection_instructions = """\
-    You are a code reflection agent. Your task is to reflect on the results of the checker and give the user suggestions to fix them.
-    Also, you ask to the user how you can be useful.
-    The results of the checker are the following:
-    """
+
 
 def reflection(state: SummaryState, config: RunnableConfig):
     """
@@ -892,6 +925,59 @@ def continue_generation(state: SummaryState, config: RunnableConfig):
     }
 
 
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import WebBaseLoader
+from langchain_community.vectorstores import Chroma
+from langchain_nomic.embeddings import NomicEmbeddings
+
+code_search_instructions = """\
+    You are a code search assistant. Your task is to search for the most relevant URLS of pages that contain code snippets and examples relevant to the following request.
+    Your output should be a JSON object with the following fields:
+    {
+        "urls": ["URL1", "URL2", ...]
+    }
+    """
+
+
+def search_relevant_sources(state: SummaryState, config: RunnableConfig):
+    """
+    Search for relevant sources based on the user's request
+    """
+    print("---SEARCHING RELEVANT SOURCES TO CODE---")
+
+    max_results = 5
+    include_raw_content = True
+
+    # Customize config to not emit tool calls
+    config = copilotkit_customize_config(config, emit_tool_calls=False)
+    
+    #await copilotkit_emit_message(config, json.dumps({
+    #    "node": "search_relevant_sources",
+    #    "content": f"Searching for: {state.search_query}"
+    #}))
+    
+    configurable = Configuration.from_runnable_config(config)
+    # Search the web
+    agent = Agent(
+        model=Ollama(id="mistral-nemo"),
+        tools=[GoogleSearchTools()],
+        show_tool_calls=False,
+        markdown=True
+        
+    )
+
+    query = code_search_instructions + "\n Search for the following query: " + state.research_topic + "\n"
+    #run_response = agent.run(query)
+    run_response = agent.run(query)  
+
+    content = run_response.content
+
+    print(f"Search results: {content}")
+
+    return {"urls": content}
+
+
+    
 
 ####################################### GRAPH BUILDING #########################################
 # Add nodes and edges 
@@ -918,6 +1004,10 @@ builder.add_node("generate_academic_query", generate_academic_query)
 
 
 # Add nodes for code generation and code checking
+builder.add_node("search_relevant_sources", search_relevant_sources)
+
+
+
 builder.add_node("generate", generate)  # generation solution
 #builder.add_node("check_code", code_check)  # check code
 #builder.add_node("continue_generation", continue_generation)
@@ -935,7 +1025,8 @@ builder.add_conditional_edges(
     {
         "Academic Source": "generate_academic_query",
         "General Web Search": "generate_query",
-        "Code": "generate",
+        #"Code": "generate",
+        "Code": "search_relevant_sources",
     }
 )
 
@@ -949,6 +1040,8 @@ builder.add_edge("finalize_summary", END)
 builder.add_edge("generate_academic_query", "academic_research")
 builder.add_edge("academic_research", "summarize_academic_sources")
 builder.add_edge("summarize_academic_sources", END)
+
+builder.add_edge("search_relevant_sources", "generate")
 
 builder.add_edge("generate", "check_code_sandbox")
 #builder.add_edge("generate", "collect_feedback")

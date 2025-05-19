@@ -165,8 +165,19 @@ code_assistant_instructions = """ \
     You MUST avoid to include any explanation or meta-commentary.
     You MUST avoid to include any new lines or special characters outside the brackets of the JSON object.
     The response MUST contain only the fields specified in the JSON format.
-    \n Here is the user question:
+    \n Based on the following context, generate the code that satisfies the query:
+    
+    Context:
+    {context}
+    
+    Question:
     {question}
     
 
+    """
+
+code_reflection_instructions = """\
+    You are a code reflection agent. Your task is to reflect on the results of the checker and give the user suggestions to fix them.
+    Also, you ask to the user how you can be useful.
+    The results of the checker are the following:
     """

@@ -32,6 +32,7 @@ class SummaryState:
     max_code_iterations: int = field(default=3)
     
     code_generation: str = field(default="Empty") # CodeOutput 
+    imports: str = field(default="Empty") # used by generator to access previous imports
     code: str = field(default="Empty") # only the code, used by the generator to access previous code
 
 
@@ -44,6 +45,8 @@ class SummaryState:
     sandbox_feedback_execution: str = field(default=None)
 
     code_reflection: str = field(default=None)
+
+    urls: str = field(default=None) 
 
 
 
