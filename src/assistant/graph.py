@@ -1,3 +1,6 @@
+# langgraph dev --no-reload
+# to run without reloading
+
 import json
 import logging
 
@@ -5,6 +8,8 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(method)s %(path)s %(status)s",  # Customize the format
 )
+
+
 
 logging.getLogger("langgraph_api.server").setLevel(logging.WARNING)
 
@@ -18,7 +23,7 @@ from langgraph.graph import START, END, StateGraph
 from assistant.configuration import Configuration
 from assistant.utils import deduplicate_and_format_sources, format_sources
 from assistant.state import SummaryState, SummaryStateInput, SummaryStateOutput
-from assistant.prompts import query_writer_instructions, summarizer_instructions, reflection_instructions, web_search_instructions, web_search_description, web_search_expected_output, router_instructions, code_assistant_instructions, academic_summarizer_instructions, code_reflection_instructions
+from assistant.prompts import query_writer_instructions, summarizer_instructions, reflection_instructions, web_search_instructions, web_search_description, web_search_expected_output, router_instructions, code_assistant_instructions, academic_summarizer_instructions, code_reflection_instructions, code_search_instructions
 from copilotkit.langgraph import copilotkit_emit_message, copilotkit_exit, copilotkit_customize_config
 
 from agno.agent import Agent
@@ -510,11 +515,12 @@ code_parser_instructions = """\
     """
 
 
+"""
 # Function to generate code, called by the node "generate"
 def generate_code(question: str, config: RunnableConfig, state: SummaryState) -> CodeOutput:
-    """
-    Use the vectorstore retriever to generate code based on the user's query.
-    """
+    
+    #Use the vectorstore retriever to generate code based on the user's query.
+    
     messages = [question]
 
     configurable = Configuration.from_runnable_config(config)
@@ -538,10 +544,14 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState) ->
 
     print(f"URLs: {urls}")    
 
-    docs = [WebBaseLoader(url).load() for url in urls] # Load the documents
+
+    # Load the documents
+    docs = [WebBaseLoader(url).load() for url in urls] 
+    print(f"Docs after WebBaseLoader: {docs}")
     docs_list = [item for sublist in docs for item in sublist] # Flatten the list
 
-    text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder( # Split the documents in chunks of 250 characters 
+    # Split the documents into chunks
+    text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder( 
         chunk_size=250, chunk_overlap=0 
     )
     doc_splits = text_splitter.split_documents(docs_list)
@@ -584,6 +594,100 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState) ->
     return CodeOutput(
         prefix=parsed_response["prefix"],
         imports="\n".join(parsed_response["imports"]) if isinstance(parsed_response["imports"], list) else parsed_response["imports"],
+        code=code_str
+    )
+
+
+"""
+
+
+
+
+
+
+
+from sentence_transformers import SentenceTransformer
+from sentence_transformers.util import cos_sim
+from langchain.schema import Document
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+#from langchain.embeddings import HuggingFaceEmbeddings
+#from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
+
+import json
+
+# Function to generate code, called by the node "generate"
+def generate_code(question: str, config: RunnableConfig, state: SummaryState) -> CodeOutput:
+    
+    
+    messages = [question]
+    configurable = Configuration.from_runnable_config(config)
+
+    agent = Agent(
+        model=Ollama(id="codellama"),
+        tools=[],
+        show_tool_calls=False,
+        structured_outputs=True,
+    )
+
+    # Load and parse URLs
+    data = json.loads(state.urls)
+    urls = data["urls"]
+    print(f"URLs: {urls}")
+
+    # Load the documents from URLs
+    docs = [WebBaseLoader(url).load() for url in urls]
+    docs_list = [item for sublist in docs for item in sublist]  # Flatten
+    print(f"Loaded {len(docs_list)} documents")
+
+    text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder( 
+        chunk_size=250, chunk_overlap=0 
+    )
+    doc_splits = text_splitter.split_documents(docs_list)
+    
+    # Create vectorstore with proper embedding function
+    vectorstore = Chroma.from_documents(
+        documents=doc_splits,
+        embedding=SentenceTransformer("nomic-ai/nomic-embed-code"),
+        collection_name="code-rag"
+    )
+
+
+    # Retrieve relevant documents
+    retriever = vectorstore.as_retriever()
+    relevant_docs = retriever.get_relevant_documents(state.research_topic)
+    context = "\n\n".join([doc.page_content for doc in relevant_docs])
+    print("CONTEXT:", context)
+
+    # Construct query
+    query = (
+        code_assistant_instructions
+        + "\n Satisfy the following instructions: " + state.research_topic
+        + "\nIf the question is a request related to the previously generated code, consider it when producing the response."
+        + "\nPrevious code:\n" + state.imports + state.code
+    )
+
+    # Generate code
+    response = agent.run(query)
+    response_text = response.content
+    print("RAW RESPONSE TEXT:\n", repr(response_text))
+
+    # Parse JSON response
+    try:
+        parsed_response = json.loads(response_text)
+    except json.JSONDecodeError as e:
+        print(f"Error during JSON parsing: {e}")
+        return CodeOutput(prefix="", imports="", code="")
+
+    # Extract outputs safely
+    code_str = str(parsed_response.get("code", ""))
+    imports_str = parsed_response.get("imports", "")
+    if isinstance(imports_str, list):
+        imports_str = "\n".join(imports_str)
+
+    return CodeOutput(
+        prefix=parsed_response.get("prefix", ""),
+        imports=imports_str,
         code=code_str
     )
 
@@ -930,13 +1034,7 @@ from langchain_community.document_loaders import WebBaseLoader
 from langchain_community.vectorstores import Chroma
 from langchain_nomic.embeddings import NomicEmbeddings
 
-code_search_instructions = """\
-    You are a code search assistant. Your task is to search for the most relevant URLS of pages that contain code snippets and examples relevant to the following request.
-    Your output should be a JSON object with the following fields:
-    {
-        "urls": ["URL1", "URL2", ...]
-    }
-    """
+
 
 
 def search_relevant_sources(state: SummaryState, config: RunnableConfig):
@@ -945,7 +1043,7 @@ def search_relevant_sources(state: SummaryState, config: RunnableConfig):
     """
     print("---SEARCHING RELEVANT SOURCES TO CODE---")
 
-    max_results = 5
+    max_results = 2 # number of results to return
     include_raw_content = True
 
     # Customize config to not emit tool calls

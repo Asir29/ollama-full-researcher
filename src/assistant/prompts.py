@@ -165,6 +165,8 @@ code_assistant_instructions = """ \
     You MUST avoid to include any explanation or meta-commentary.
     You MUST avoid to include any new lines or special characters outside the brackets of the JSON object.
     The response MUST contain only the fields specified in the JSON format.
+    DO NOT include Markdown formatting (no ``` or code blocks).
+
     \n Based on the following context, generate the code that satisfies the query:
     
     Context:
@@ -180,4 +182,12 @@ code_reflection_instructions = """\
     You are a code reflection agent. Your task is to reflect on the results of the checker and give the user suggestions to fix them.
     Also, you ask to the user how you can be useful.
     The results of the checker are the following:
+    """
+
+code_search_instructions = """\
+    You are a code search assistant. Your task is to search for the most relevant URLS of pages that contain code snippets and examples relevant to the following request.
+    Your output should be a JSON object with the following fields:
+    {
+        "urls": ["URL1", "URL2", ...]
+    }
     """
