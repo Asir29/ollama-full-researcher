@@ -38,6 +38,7 @@ dependencies = [
     "chromadb==1.0.9",
     "langchain_nomic==0.3.0",
     "gpt4all==2.8.2",
+    "sentence-transformers>=4.1.0",
     
 
 
