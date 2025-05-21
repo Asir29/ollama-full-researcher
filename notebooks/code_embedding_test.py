@@ -37,7 +37,7 @@ class CodeOutput(BaseModel):
 # Proper embedding wrapper for LangChain
 class SentenceTransformerEmbeddings(Embeddings):
     def __init__(self, model_name: str):
-        self.model = SentenceTransformer(model_name, trust_remote_code=True, device="cpu")
+        self.model = SentenceTransformer(model_name, trust_remote_code=True, device="cpu") # use "cuda" for GPU
 
     def embed_documents(self, texts):
         return self.model.encode(texts).tolist()

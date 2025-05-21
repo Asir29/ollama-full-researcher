@@ -167,15 +167,6 @@ code_assistant_instructions = """ \
     The response MUST contain only the fields specified in the JSON format.
     DO NOT include Markdown formatting (no ``` or code blocks).
 
-    \n Based on the following context, generate the code that satisfies the query:
-    
-    Context:
-    {context}
-    
-    Question:
-    {question}
-    
-
     """
 
 code_reflection_instructions = """\

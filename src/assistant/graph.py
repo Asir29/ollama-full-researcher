@@ -607,80 +607,86 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState) ->
 
 
 from sentence_transformers import SentenceTransformer
-from sentence_transformers.util import cos_sim
 from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-#from langchain.embeddings import HuggingFaceEmbeddings
-#from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_huggingface import HuggingFaceEmbeddings
-
+from langchain_community.document_loaders import WebBaseLoader
+from langchain_community.vectorstores import Chroma
+from langchain.embeddings.base import Embeddings
+from pydantic import BaseModel, Field
+from agno.agent import Agent
+from agno.models.ollama import Ollama
+import numpy as np
 import json
 
-# Function to generate code, called by the node "generate"
-def generate_code(question: str, config: RunnableConfig, state: SummaryState) -> CodeOutput:
-    
-    
-    messages = [question]
-    configurable = Configuration.from_runnable_config(config)
 
+# Proper embedding wrapper for LangChain
+class SentenceTransformerEmbeddings(Embeddings):
+    def __init__(self, model_name: str):
+        self.model = SentenceTransformer(model_name, trust_remote_code=True, device="cpu")
+
+    def embed_documents(self, texts):
+        return self.model.encode(texts).tolist()
+
+    def embed_query(self, text):
+        return self.model.encode([text])[0].tolist()
+
+
+def generate_code(question: str, config: RunnableConfig, state: SummaryState) -> CodeOutput:
     agent = Agent(
         model=Ollama(id="codellama"),
         tools=[],
         show_tool_calls=False,
-        structured_outputs=True,
+        use_json_mode=True,
     )
 
-    # Load and parse URLs
+    # Load URLs
     data = json.loads(state.urls)
     urls = data["urls"]
     print(f"URLs: {urls}")
 
-    # Load the documents from URLs
+    # Load documents
     docs = [WebBaseLoader(url).load() for url in urls]
-    docs_list = [item for sublist in docs for item in sublist]  # Flatten
+    docs_list = [doc for sublist in docs for doc in sublist]
     print(f"Loaded {len(docs_list)} documents")
 
-    text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder( 
-        chunk_size=250, chunk_overlap=0 
+    # Split documents
+    text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+        chunk_size=128, chunk_overlap=0
     )
     doc_splits = text_splitter.split_documents(docs_list)
-    
-    # Create vectorstore with proper embedding function
+
+    # Use lightweight embedding model
+    embedding_model = SentenceTransformerEmbeddings("nomic-ai/CodeRankEmbed")
+
+
+    # Vectorstore
     vectorstore = Chroma.from_documents(
         documents=doc_splits,
-        embedding=SentenceTransformer("nomic-ai/nomic-embed-code"),
-        collection_name="code-rag"
+        embedding=embedding_model,
+        collection_name="code-rag",
     )
 
-
-    # Retrieve relevant documents
+    # Retrieve
     retriever = vectorstore.as_retriever()
     relevant_docs = retriever.get_relevant_documents(state.research_topic)
     context = "\n\n".join([doc.page_content for doc in relevant_docs])
     print("CONTEXT:", context)
 
     # Construct query
-    query = (
-        code_assistant_instructions
-        + "\n Satisfy the following instructions: " + state.research_topic
-        + "\nIf the question is a request related to the previously generated code, consider it when producing the response."
-        + "\nPrevious code:\n" + state.imports + state.code
-    )
+    query = code_assistant_instructions + "\n Based on the following context, generate the code that satisfies the question:" + "Context: " + context + "\nQuestion: " + state.research_topic + "\n" + "If the question is a request related to the previusly generated code, consider it when producing the response. In the following the previously generated code: " + state.imports + state.code
 
-    # Generate code
+    # Run agent
     response = agent.run(query)
     response_text = response.content
     print("RAW RESPONSE TEXT:\n", repr(response_text))
 
-    # Parse JSON response
+    # Parse result
     try:
         parsed_response = json.loads(response_text)
     except json.JSONDecodeError as e:
         print(f"Error during JSON parsing: {e}")
         return CodeOutput(prefix="", imports="", code="")
 
-    # Extract outputs safely
-    code_str = str(parsed_response.get("code", ""))
     imports_str = parsed_response.get("imports", "")
     if isinstance(imports_str, list):
         imports_str = "\n".join(imports_str)
@@ -688,10 +694,8 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState) ->
     return CodeOutput(
         prefix=parsed_response.get("prefix", ""),
         imports=imports_str,
-        code=code_str
+        code=parsed_response.get("code", "")
     )
-
-
 
 
 ## Function to generate code
@@ -972,7 +976,7 @@ def process_feedback(state: SummaryState, config: RunnableConfig):
     Based on that, respond with one of the following exact JSON objects:\n\n
     {{"response": "approve"}}\n
     {{"response": "regenerate"}}\n\n
-    In particular, approve means that the user is satisfied with the code and wants to finish.\n
+    In particular, approve means that the user does not request any change in the code.\n
     Regenerate means that the user wants to regenerate the code with some modifications.\n
     Only return the JSON. Do not include any other text, logs, or thoughts."""
 
