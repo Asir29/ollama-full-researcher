@@ -621,7 +621,7 @@ import json
 # Proper embedding wrapper for LangChain
 class SentenceTransformerEmbeddings(Embeddings):
     def __init__(self, model_name: str):
-        self.model = SentenceTransformer(model_name, trust_remote_code=True, device="cpu")
+        self.model = SentenceTransformer(model_name, trust_remote_code=True, device="cuda") # change here if want to use "cuda" or "cpu"
 
     def embed_documents(self, texts):
         return self.model.encode(texts).tolist()
@@ -970,14 +970,23 @@ def process_feedback(state: SummaryState, config: RunnableConfig):
     )
 
     prompt = f"""\
-    You are a decision agent.\n
-    You receive the user feedback: {state.research_topic}.\n
-    Based on that, respond with one of the following exact JSON objects:\n\n
-    {{"response": "approve"}}\n
-    {{"response": "regenerate"}}\n\n
-    In particular, approve means that the user does not request any change in the code.\n
-    Regenerate means that the user wants to regenerate the code with some modifications.\n
-    Only return the JSON. Do not include any other text, logs, or thoughts."""
+
+    You are a decision agent.
+
+    You are given user feedback: {state.research_topic}
+
+    Based on this feedback, respond with **only one** of the following exact JSON objects:
+
+    {{"response": "approve"}}
+    {{"response": "regenerate"}}
+
+    ### Definitions:
+    - Use **"approve"** if the user is fully satisfied and wants to keep the code exactly as it is, with **no changes requested**.
+    - Use **"regenerate"** if the user asks for **any modifications**, **improvements**, or expresses **dissatisfaction** with the current code.
+
+    Only return the JSON object — do not include any other text, explanations, or logs.
+    """
+
 
     
 
