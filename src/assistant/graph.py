@@ -20,10 +20,10 @@ from langchain_core.runnables import RunnableConfig
 from langchain_ollama import ChatOllama
 from langgraph.graph import START, END, StateGraph
 
-from assistant.configuration import Configuration
-from assistant.utils import deduplicate_and_format_sources, format_sources
-from assistant.state import SummaryState, SummaryStateInput, SummaryStateOutput
-from assistant.prompts import query_writer_instructions, summarizer_instructions, reflection_instructions, web_search_instructions, web_search_description, web_search_expected_output, router_instructions, code_assistant_instructions, academic_summarizer_instructions, code_reflection_instructions, code_search_instructions
+from src.assistant.configuration import Configuration
+from src.assistant.utils import deduplicate_and_format_sources, format_sources
+from src.assistant.state import SummaryState, SummaryStateInput, SummaryStateOutput
+from src.assistant.prompts import query_writer_instructions, summarizer_instructions, reflection_instructions, web_search_instructions, web_search_description, web_search_expected_output, router_instructions, code_assistant_instructions, academic_summarizer_instructions, code_reflection_instructions, code_search_instructions
 from copilotkit.langgraph import copilotkit_emit_message, copilotkit_exit, copilotkit_customize_config
 
 from agno.agent import Agent
@@ -31,7 +31,6 @@ from agno.tools.googlesearch import GoogleSearchTools
 from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.models.ollama import Ollama
 from langchain_ollama import ChatOllama
-from assistant.configuration import Configuration
 
 from scholarly import scholarly
 
