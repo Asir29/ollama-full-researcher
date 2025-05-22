@@ -12,3 +12,4 @@ src/assistant/__pycache__/state.cpython-311.pyc
 src/assistant/__pycache__/utils.cpython-311.pyc
 .env
 frontend/.env
+src/assistant/__pycache__/graph.cpython-313.pyc
