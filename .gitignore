@@ -13,3 +13,9 @@ src/assistant/__pycache__/utils.cpython-311.pyc
 .env
 frontend/.env
 src/assistant/__pycache__/graph.cpython-313.pyc
+src/assistant/__pycache__/__init__.cpython-313.pyc
+src/assistant/__pycache__/__init__.cpython-313.pyc
+src/assistant/__pycache__/utils.cpython-313.pyc
+src/assistant/__pycache__/state.cpython-313.pyc
+src/assistant/__pycache__/prompts.cpython-313.pyc
+src/assistant/__pycache__/graph.cpython-313.pyc
