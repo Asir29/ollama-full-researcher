@@ -54,6 +54,31 @@ from typing import TypedDict, Literal
 from langgraph.types import interrupt
 from langgraph.checkpoint.memory import MemorySaver
 
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import WebBaseLoader
+from langchain_community.vectorstores import Chroma
+from langchain_nomic.embeddings import NomicEmbeddings
+
+import asyncio
+from semanticscholar import SemanticScholar
+
+from e2b_code_interpreter import Sandbox
+from openevals.code.e2b.pyright import create_e2b_pyright_evaluator
+from openevals.code.e2b.execution import create_e2b_execution_evaluator
+
+from sentence_transformers import SentenceTransformer
+from langchain.schema import Document
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import WebBaseLoader
+from langchain_community.vectorstores import Chroma
+from langchain.embeddings.base import Embeddings
+from pydantic import BaseModel, Field
+from agno.agent import Agent
+from agno.models.ollama import Ollama
+import numpy as np
+import json
+
+
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -368,21 +393,12 @@ def route_research(state: SummaryState, config: RunnableConfig) -> Literal["fina
         return "web_research"
     else:
         return "finalize_summary" 
-
-    # agent = Agent(
-    #     model=Ollama(id="mistral-nemo"),
-    #     tools=[GoogleSearchTools()],
-    #     show_tool_calls=False,
-    #     structured_outputs=True
-
-    # )   
+   
 
 
 ######################################## ACADEMIC RESEARCH BRANCH ############################################
 
-import asyncio
-from semanticscholar import SemanticScholar
-import asyncio
+
 
 async def generate_academic_query(state: SummaryState, config: RunnableConfig):
     """ Generate a query for academic search """
@@ -409,39 +425,7 @@ async def generate_academic_query(state: SummaryState, config: RunnableConfig):
 
 
 
-import asyncio
 
-import httpx
-
-# SEMANTIC_SCHOLAR_API_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
-
-# async def academic_research(state, config, papers_limit=3):
-#     """Perform academic research using Semantic Scholar's public API."""
-
-#     query = state["search_query"] if isinstance(state, dict) else state.search_query
-#     params = {
-#         "query": query,
-#         "limit": papers_limit,
-#         "fields": "title,abstract"
-#     }
-
-#     try:
-#         async with httpx.AsyncClient() as client:
-#             response = await client.get(SEMANTIC_SCHOLAR_API_URL, params=params)
-#             response.raise_for_status()
-#             data = response.json()
-#     except Exception as e:
-#         print(f"Error fetching papers: {e}")
-#         return {"academic_source_content": []}
-
-#     abstracts = [
-#         f"{paper.get('title', 'No title')} - {paper.get('abstract', 'No abstract')}"
-#         for paper in data.get("data", [])
-#     ]
-
-#     return {"academic_source_content": abstracts}
-
-from scholarly import scholarly
 
 async def academic_research(state, config, papers_limit=3):
     query = state.get("search_query") if isinstance(state, dict) else getattr(state, "search_query", "")
@@ -523,11 +507,6 @@ async def summarize_academic_sources(state: SummaryState, config: RunnableConfig
 
 ########################################### CODE GENERATION BRANCH #############################################
 
-from e2b_code_interpreter import Sandbox
-
-from openevals.code.e2b.pyright import create_e2b_pyright_evaluator
-
-from openevals.code.e2b.execution import create_e2b_execution_evaluator
 
 
 
@@ -551,108 +530,7 @@ code_parser_instructions = """\
     """
 
 
-"""
-# Function to generate code, called by the node "generate"
-def generate_code(question: str, config: RunnableConfig, state: SummaryState) -> CodeOutput:
-    
-    #Use the vectorstore retriever to generate code based on the user's query.
-    
-    messages = [question]
 
-    configurable = Configuration.from_runnable_config(config)
-
-    agent = Agent(
-        model=Ollama(id="codellama"),
-        tools=[],
-        show_tool_calls=False,
-        structured_outputs=True,
-    )
-
-    # create the embedding
-    # Load the URLs
-    urls = state.urls
-
-    # Parse the JSON string
-    data = json.loads(urls)
-
-    # Extract the URLs into a Python list
-    urls = data["urls"]
-
-    print(f"URLs: {urls}")    
-
-
-    # Load the documents
-    docs = [WebBaseLoader(url).load() for url in urls] 
-    print(f"Docs after WebBaseLoader: {docs}")
-    docs_list = [item for sublist in docs for item in sublist] # Flatten the list
-
-    # Split the documents into chunks
-    text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder( 
-        chunk_size=250, chunk_overlap=0 
-    )
-    doc_splits = text_splitter.split_documents(docs_list)
-
-    # Add to vectorDB
-    vectorstore = Chroma.from_documents( # Add the documents to the vectorstore, using the NomicEmbeddings model
-        documents=doc_splits,
-        collection_name="rag-chroma",
-        embedding=NomicEmbeddings(model="nomic-embed-text-v1.5", inference_mode="local"),
-    )
-    retriever = vectorstore.as_retriever() # Create a retriever from the vectorstore, to retrieve the most similar documents
-
-    # Retrieve relevant documents
-    relevant_docs = retriever.get_relevant_documents(state.research_topic) # Retrieve the most relevant documents based on the query
-    context = "\n\n".join([doc.page_content for doc in relevant_docs])
-
-    print("CONTEXT:", context)
-    
-    query = code_assistant_instructions + "\n Satisfy the following instructions: " + state.research_topic + "\n" + "If the question is a request related to the previusly generated code, consider it when producing the response. In the following the previously generated code: " + state.imports + state.code
-    response = agent.run(query)  
-
-
-    response_text = response.content  # This is a string
-
-    print("RAW RESPONSE TEXT:\n", repr(response_text))
-
-    # Parse the response into dict
-    try:
-        parsed_response = json.loads(response_text)
-    except json.JSONDecodeError as e:
-        print(f"Error during JSON parsing: {e}")
-        return CodeOutput(prefix="", imports="", code="")
-
-    # Ensure that `code` is always a string, even if it is empty or None
-    code_str = str(parsed_response.get("code", ""))
-    # Ensure that `imports` is always a string, even if it is empty or None
-    #imports_str = str(parsed_response.get("imports", ""))
-
-
-    return CodeOutput(
-        prefix=parsed_response["prefix"],
-        imports="\n".join(parsed_response["imports"]) if isinstance(parsed_response["imports"], list) else parsed_response["imports"],
-        code=code_str
-    )
-
-
-"""
-
-
-
-
-
-
-
-from sentence_transformers import SentenceTransformer
-from langchain.schema import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import WebBaseLoader
-from langchain_community.vectorstores import Chroma
-from langchain.embeddings.base import Embeddings
-from pydantic import BaseModel, Field
-from agno.agent import Agent
-from agno.models.ollama import Ollama
-import numpy as np
-import json
 
 
 # Proper embedding wrapper for LangChain
@@ -803,87 +681,6 @@ def generate(state: SummaryState, config: RunnableConfig):
     # Increment
     state.code_iterations = state.code_iterations + 1
     return {"code_generation": code_solution} #, "user_feedback": state.user_feedback
-
-
-def code_check(state: SummaryState):
-    """
-    Check code
-
-    Args:
-        state (dict): The current graph state
-
-    Returns:
-        state (dict): New key added to state, error
-    """
-
-    print("---CHECKING CODE---")
-
-    print(f"Current state: {state}")
-    # State
-    messages = state.messages
-    code_solution = state.code_generation
-    iterations = state.code_iterations
-
-    if code_solution is None:
-        logger.error("code_solution is None. Cannot check code.")
-        return
-    imports = code_solution.imports
-
-    # Get solution components
-    imports = code_solution.imports
-    code = code_solution.code
-
-    # Check imports
-    try:
-        exec(imports) # Check imports, it actually executes the imports
-    except Exception as e:
-        print("---CODE IMPORT CHECK: FAILED---")
-        error_message = [
-            (
-                "user",
-                f"Your solution failed the import test. Here is the error: {e}. Reflect on this error and your prior attempt to solve the problem. (1) State what you think went wrong with the prior solution and (2) try to solve this problem again. Return the FULL SOLUTION. Use the code tool to structure the output with a prefix, imports, and code block:",
-            )
-        ]
-        messages += error_message
-        return {
-            "code_generation": code_solution,
-            "messages": messages,
-            "code_iterations": state.code_iterations,
-            "error": "yes",
-        }
-
-    # Check execution
-    try:
-        combined_code = f"{imports}\n{code}"
-        print(f"CODE TO TEST: {combined_code}")
-        # Use a shared scope for exec
-        global_scope = {}
-        exec(combined_code, global_scope)
-    except Exception as e:
-        print("---CODE BLOCK CHECK: FAILED---")
-        error_message = [
-            (
-                "user",
-                f"Your solution failed the code execution test: {e}) Reflect on this error and your prior attempt to solve the problem. (1) State what you think went wrong with the prior solution and (2) try to solve this problem again. Return the FULL SOLUTION. Use the code tool to structure the output with a prefix, imports, and code block:",
-            )
-        ]
-        messages += error_message
-        return {
-            "code_generation": code_solution,
-            "messages": messages,
-            "code_iterations": iterations,
-            "error": "yes",
-        }
-
-    # No errors
-    print("---NO CODE TEST FAILURES---")
-    return {
-        "code_generation": code_solution,
-        "messages": messages,
-        "code_iterations": iterations,
-        "error": "no",
-    }
-
 
 
 
@@ -1081,31 +878,6 @@ def process_feedback(state: SummaryState, config: RunnableConfig):
 
 
 
-
-
-
-# not used
-def continue_generation(state: SummaryState, config: RunnableConfig):
-    """
-    Continue the generation from where it left off.
-    """
-    print("---CONTINUING CODE GENERATION---")
-
-    continued_code = continue_code_generation(state.code_generation.code, config, state)
-
-    state.code_generation.code += "\n" + continued_code
-    state.messages.append(("assistant", f"Continuing code generation:\n```\n{continued_code}\n```"))
-
-    return {
-        "code_generation": state.code_generation,
-        "messages": state.messages
-    }
-
-
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import WebBaseLoader
-from langchain_community.vectorstores import Chroma
-from langchain_nomic.embeddings import NomicEmbeddings
 
 
 
