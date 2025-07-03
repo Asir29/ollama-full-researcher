@@ -409,21 +409,58 @@ async def generate_academic_query(state: SummaryState, config: RunnableConfig):
 
 
 
-async def academic_research(state, config, papers_limit=3):
-    """Perform academic research for the most relevant papers."""
-    sch = SemanticScholar()
+import asyncio
 
-    try:
-        # Run sync method in background thread
-        results = await asyncio.to_thread(sch.search_paper, state.search_query, limit=papers_limit)
-    except Exception as e:
-        print(f"Error fetching papers: {e}")
-        return {"academic_source_content": []}
-    
-    abstracts = [
-        f"{paper.title} - {paper.abstract or 'No abstract'}"
-        for paper in results
-    ]
+import httpx
+
+# SEMANTIC_SCHOLAR_API_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
+
+# async def academic_research(state, config, papers_limit=3):
+#     """Perform academic research using Semantic Scholar's public API."""
+
+#     query = state["search_query"] if isinstance(state, dict) else state.search_query
+#     params = {
+#         "query": query,
+#         "limit": papers_limit,
+#         "fields": "title,abstract"
+#     }
+
+#     try:
+#         async with httpx.AsyncClient() as client:
+#             response = await client.get(SEMANTIC_SCHOLAR_API_URL, params=params)
+#             response.raise_for_status()
+#             data = response.json()
+#     except Exception as e:
+#         print(f"Error fetching papers: {e}")
+#         return {"academic_source_content": []}
+
+#     abstracts = [
+#         f"{paper.get('title', 'No title')} - {paper.get('abstract', 'No abstract')}"
+#         for paper in data.get("data", [])
+#     ]
+
+#     return {"academic_source_content": abstracts}
+
+from scholarly import scholarly
+
+async def academic_research(state, config, papers_limit=3):
+    query = state.get("search_query") if isinstance(state, dict) else getattr(state, "search_query", "")
+
+    # scholarly is synchronous, so run in a thread to avoid blocking event loop
+    def fetch_papers():
+        search_query = scholarly.search_pubs(query)
+        results = []
+        for _ in range(papers_limit):
+            try:
+                paper = next(search_query)
+                title = paper.get('bib', {}).get('title', 'No title')
+                abstract = paper.get('bib', {}).get('abstract', 'No abstract')
+                results.append(f"{title} - {abstract}")
+            except StopIteration:
+                break
+        return results
+
+    abstracts = await asyncio.to_thread(fetch_papers)
 
     return {"academic_source_content": abstracts}
 
@@ -639,7 +676,7 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState) ->
     )
 
     # Load URLs
-    data = json.loads(state.urls)
+    data = json.loads(state.urls or "{}" )
     urls = data["urls"]
     print(f"URLs: {urls}")
 
@@ -680,19 +717,43 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState) ->
     print("RAW RESPONSE TEXT:\n", repr(response_text))
 
     # Parse result
-    try:
-        parsed_response = json.loads(response_text)
-    except json.JSONDecodeError as e:
-        print(f"Error during JSON parsing: {e}")
-        return CodeOutput(prefix="", imports="", code="")
+    # try:
+    #     parsed_response = json.loads(response_text)
+    # except json.JSONDecodeError as e:
+    #     print(f"Error during JSON parsing: {e}")
+    #     return CodeOutput(prefix="", imports="", code="")
 
-    imports_str = parsed_response.get("imports", "")
-    if isinstance(imports_str, list):
-        imports_str = "\n".join(imports_str)
+    # imports_str = parsed_response.get("imports", "")
+    # if isinstance(imports_str, list):
+    #     imports_str = "\n".join(imports_str)
+
+    # Parse result with LLM
+    agent_parser = Agent(
+        model=Ollama(id="codellama"),
+        tools=[],
+        show_tool_calls=False,
+        use_json_mode=True,
+    )  
+
+    ### LLM TO MAKE THE PARSING THE MORE PROBABLE POSSIBLE
+    code_parser_instructions = """Take the generated code and return a json object with the following fields: prefix, imports, code. 
+                                The prefix is a description of the code solution, the imports are the necessary import statements, and the code is the functioning code block.
+                                The output should be a JSON object with the following fields: {\"prefix\": \"A description of the code solution\", \"imports\": \"The necessary import statements\", \"code\": \"The functioning code block\"}"
+                                AVOID any meta-commentary (example imports with square brackets).
+                                Generated code:
+    """ 
+    parser_query = code_parser_instructions + " " + response_text
+    
+    response = agent.run(parser_query)
+    print("RAW PARSER RESPONSE TEXT:\n", repr(response.content))
+    response_text = response.content
+    parsed_response = json.loads(response_text)
+
+    print("PARSED RESPONSE TEXT:\n", parsed_response)
 
     return CodeOutput(
         prefix=parsed_response.get("prefix", ""),
-        imports=imports_str,
+        imports=parsed_response.get("imports", ""),
         code=parsed_response.get("code", "")
     )
 
@@ -741,7 +802,7 @@ def generate(state: SummaryState, config: RunnableConfig):
 
     # Increment
     state.code_iterations = state.code_iterations + 1
-    return {"code_generation": code_solution, "code":code_solution.code, "imports":code_solution.imports, "messages": messages, "code_iterations": state.code_iterations} #, "user_feedback": state.user_feedback
+    return {"code_generation": code_solution} #, "user_feedback": state.user_feedback
 
 
 def code_check(state: SummaryState):
