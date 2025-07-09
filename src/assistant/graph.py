@@ -706,43 +706,51 @@ def generate(state: SummaryState, config: RunnableConfig):
 
 import json
 
-def extract_packages_from_imports(import_block: str) -> list[str]:
+def extract_packages_from_imports(import_block: str):
     """
     Use LLM to extract pip-installable packages from import block.
     """
     print("Extracting packages from imports...", import_block)
 
+    # Format the prompt correctly with the actual imports
     prompt = f"""
-Given the following Python import statements, return a JSON list of pip packages that should be installed.
-Respond ONLY with a valid JSON array (e.g., ["torch", "snntorch", "matplotlib"]). No commentary.
+You are given a block of Python import statements.
 
-Imports:
+Your task is to return ONLY a valid JSON list of the pip packages required to run the code.
+
+### Instructions:
+- Output ONLY a valid JSON array (e.g., ["torch", "snntorch", "matplotlib"]).
+- Do NOT include any commentary, explanation, markdown formatting, or code fences.
+- If a module is part of the Python standard library (e.g., sys, os), exclude it.
+- Do NOT deduplicate or guess extra packages not directly mentioned.
+
+### Imports:
 {import_block}
 """.strip()
 
+
     agent = Agent(
-        model="deepseek-r1",
+        model="mistral-nemo",
         tools=[],
         show_tool_calls=False,
-        structured_outputs=False
+        #structured_outputs=json
     )
 
     try:
         response = agent.run(prompt)
+        print("RAW RESPONSE TEXT PACKAGES EXTRACTOR:\n", response)
 
-        # If agent returns an object with `.content`, extract it
         if hasattr(response, "content"):
             response_text = response.content
         else:
             response_text = str(response)
-
-        print("RAW RESPONSE TEXT PACKAGES EXTRACTOR:\n", response_text)
 
         return json.loads(response_text)
 
     except Exception as e:
         print("Fallback to empty package list due to error:", e)
         return []
+
 
 
 
@@ -774,7 +782,7 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
     # Step 2: Install packages
     for pkg in packages:
         print(f"Installing {pkg} in sandbox...")
-        result = sandbox.run(f"pip install {pkg}")
+        result = sandbox.run(f"pip install {pkg}", timeout=0)
         print(result.stdout or result.stderr)
 
     # Step 3: Static type check
