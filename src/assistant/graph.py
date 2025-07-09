@@ -521,6 +521,7 @@ class CodeOutput(BaseModel):
 code_parser_instructions = """\
     You are a code parser. Your task is to extract the prefix, imports, and code from the following text.
     The text is a response from a code assistant. The response is structured in JSON format.
+    
     The output should be a JSON object with the following fields:
     {
         "prefix": "A description of the code solution",
@@ -613,13 +614,29 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState) ->
         use_json_mode=True,
     )  
 
-    ### LLM TO MAKE THE PARSING THE MORE PROBABLE POSSIBLE
-    code_parser_instructions = """Take the generated code and return a json object with the following fields: prefix, imports, code. 
-                                The prefix is a description of the code solution, the imports are the necessary import statements, and the code is the functioning code block.
-                                The output should be a JSON object with the following fields: {\"prefix\": \"A description of the code solution\", \"imports\": \"The necessary import statements\", \"code\": \"The functioning code block\"}"
-                                AVOID any meta-commentary (example imports with square brackets).
-                                Generated code:
-    """ 
+    code_parser_instructions = """You are a code parser.
+
+    Take the generated code response and extract the following fields:
+    - prefix: a short description of the code solution
+    - imports: all required import statements as a single string
+    - code: the actual Python code (excluding imports)
+
+    ⚠️ Important:
+    - The imports must be returned as a single string (not a list).
+    - Do not return markdown formatting like ```json or explanations.
+    - Return ONLY a valid JSON object — no comments, no intro.
+
+    Example output format:
+    {
+    "prefix": "A classifier using snnTorch.",
+    "imports": "import torch\\nimport snntorch as snn",
+    "code": "class Net(nn.Module):\\n    def forward(self, x):\\n        return self.fc(x)"
+    }
+
+    Respond ONLY with a JSON object following this format.
+    Generated code:
+    """
+
     parser_query = code_parser_instructions + " " + response_text
     
     response = agent.run(parser_query)
@@ -629,9 +646,13 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState) ->
 
     print("PARSED RESPONSE TEXT:\n", parsed_response)
 
+    imports_str = parsed_response.get("imports", "")
+    if isinstance(imports_str, list):
+        imports_str = "\n".join(imports_str)
+
     return CodeOutput(
         prefix=parsed_response.get("prefix", ""),
-        imports=parsed_response.get("imports", ""),
+        imports=imports_str,
         code=parsed_response.get("code", "")
     )
 
@@ -683,45 +704,94 @@ def generate(state: SummaryState, config: RunnableConfig):
     return {"code_generation": code_solution} #, "user_feedback": state.user_feedback
 
 
+import json
+
+def extract_packages_from_imports(import_block: str) -> list[str]:
+    """
+    Use LLM to extract pip-installable packages from import block.
+    """
+    print("Extracting packages from imports...", import_block)
+
+    prompt = f"""
+Given the following Python import statements, return a JSON list of pip packages that should be installed.
+Respond ONLY with a valid JSON array (e.g., ["torch", "snntorch", "matplotlib"]). No commentary.
+
+Imports:
+{import_block}
+""".strip()
+
+    agent = Agent(
+        model="deepseek-r1",
+        tools=[],
+        show_tool_calls=False,
+        structured_outputs=False
+    )
+
+    try:
+        response = agent.run(prompt)
+
+        # If agent returns an object with `.content`, extract it
+        if hasattr(response, "content"):
+            response_text = response.content
+        else:
+            response_text = str(response)
+
+        print("RAW RESPONSE TEXT PACKAGES EXTRACTOR:\n", response_text)
+
+        return json.loads(response_text)
+
+    except Exception as e:
+        print("Fallback to empty package list due to error:", e)
+        return []
+
+
 
 
 
 def check_code_sandbox(state: SummaryState, config: RunnableConfig):
     """
-    Check code in a sandbox
+    Check code in a sandbox with dependency installation.
     """
 
-    # E2B template with uv and pyright preinstalled
     sandbox = Sandbox("OpenEvalsPython")
+    # SandBox metrics are in a private beta for now
+    # metrics = sandbox.get_metrics() 
+    # print("Sandbox metrics:", metrics)
 
-    # Create the evaluator
-    evaluator = create_e2b_pyright_evaluator(
-    sandbox=sandbox,
-    )
-
-    imports = state.code_generation.imports
-    code = state.code_generation.code
-
-    # Combine imports and code
+    imports = state.code_generation.imports or ""
+    print("Imports to give to extract_packages:", imports)
+    code = state.code_generation.code or ""
     combined_code = f"{imports}\n{code}"
 
-    eval_result_pyright = evaluator(outputs=combined_code)
+    # Step 1: Extract dependencies via LLM
+    try:
+        packages = extract_packages_from_imports(imports)
+        print("Inferred packages:", packages)
+    except Exception as e:
+        print("Fallback to empty package list due to error:", e)
+        packages = []
 
-    print(eval_result_pyright)
+    # Step 2: Install packages
+    for pkg in packages:
+        print(f"Installing {pkg} in sandbox...")
+        result = sandbox.run(f"pip install {pkg}")
+        print(result.stdout or result.stderr)
 
+    # Step 3: Static type check
+    evaluator_pyright = create_e2b_pyright_evaluator(sandbox=sandbox)
+    eval_result_pyright = evaluator_pyright(outputs=combined_code)
+    print("Pyright result:", eval_result_pyright)
 
-    evaluator = create_e2b_execution_evaluator(
-    sandbox=sandbox,
-    )
+    # Step 4: Execution check
+    evaluator_exec = create_e2b_execution_evaluator(sandbox=sandbox)
+    eval_result_execution = evaluator_exec(outputs=combined_code)
+    print("Execution result:", eval_result_execution)
 
-    eval_result_execution = evaluator(outputs=combined_code)
-
-    print(eval_result_execution)
-
-    return { 
+    return {
         "sandbox_feedback_pyright": eval_result_pyright,
         "sandbox_feedback_execution": eval_result_execution
     }
+
 
 
 
@@ -841,7 +911,7 @@ def process_feedback(state: SummaryState, config: RunnableConfig):
     ### Definitions:
     - Use **"approve"** if the user is fully satisfied and wants to keep the code exactly as it is, with **no changes requested**.
     - Use **"regenerate"** if the user asks for **any modifications**, **improvements**, or expresses **dissatisfaction** with the current code.
-
+    - Use **"evaluation"** if the user wants to perform an evaluation or if the user talks about to evaluate.
     Only return the JSON object — do not include any other text, explanations, or logs.
     """
 
@@ -920,7 +990,66 @@ def search_relevant_sources(state: SummaryState, config: RunnableConfig):
     return {"urls": content}
 
 
-    
+def evaluation(state: SummaryState, config: RunnableConfig):
+    """
+    Perform a systematic evaluation with ground truth code in an E2B sandbox.
+    """
+    print("---PERFORMING EVALUATION---")
+
+    code_output = state.code_generation
+    imports = code_output.imports
+    code = code_output.code
+
+    # Extract packages from import lines
+    import_lines = imports.split("\n")
+    packages = set()
+    for line in import_lines:
+        line = line.strip()
+        if line.startswith("import "):
+            parts = line.split()
+            if len(parts) >= 2:
+                packages.add(parts[1].split(".")[0])
+        elif line.startswith("from "):
+            parts = line.split()
+            if len(parts) >= 2:
+                packages.add(parts[1].split(".")[0])
+
+    # Convert to pip install command
+    pip_cmd = "pip install " + " ".join(sorted(packages)) if packages else ""
+
+    # Combine everything
+    executable_code = f"""
+    import subprocess
+    import sys
+
+    # Install necessary packages
+    subprocess.run([sys.executable, "-m", "pip", "install", {" ".join(repr(pkg) for pkg in packages)}])
+
+    # --- Imports ---
+    {imports}
+
+    # --- Code ---
+    {code}
+        """.strip()
+
+    # Now run the code in E2B sandbox
+
+
+    sandbox = Sandbox("OpenEvalsPython")
+
+    # Optional: run pip install directly (if using SDK-level install)
+    # await sandbox.run(pip_cmd)
+
+    evaluator = create_e2b_execution_evaluator(sandbox=sandbox)
+
+    result = evaluator(outputs=executable_code)
+
+    print("EVALUATION RESULT:")
+    print(result)
+
+    return {"evaluation_result": result}
+
+
 
 ####################################### GRAPH BUILDING #########################################
 # Add nodes and edges 
@@ -958,6 +1087,7 @@ builder.add_node("collect_feedback", collect_feedback)
 builder.add_node("process_feedback", process_feedback)
 builder.add_node("check_code_sandbox", check_code_sandbox)  # check code in sandbox
 builder.add_node("reflection", reflection)  # reflect on code
+builder.add_node("evaluation", evaluation) # perform a systematic evaluation with groud truth code
 
 # Add edges
 builder.add_edge(START, "route_question")
@@ -1002,9 +1132,11 @@ builder.add_conditional_edges(
     {
         "regenerate": "generate",
         "approve": END,
+        "evaluation": "evaluation"
     },
 )
 
+builder.add_edge("evaluation", END)
 
 
 
