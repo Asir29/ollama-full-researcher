@@ -66,6 +66,7 @@ from e2b_code_interpreter import Sandbox
 from openevals.code.e2b.pyright import create_e2b_pyright_evaluator
 from openevals.code.e2b.execution import create_e2b_execution_evaluator
 
+
 from sentence_transformers import SentenceTransformer
 from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -718,11 +719,15 @@ def extract_packages_from_imports(import_block: str):
         Your task is to return ONLY the pip-installable package names as a single comma-separated string.
 
         ### Instructions:
-        - Output ONLY the package names, separated by commas (e.g., torch,snntorch,matplotlib).
+        - Output ONLY the top-level package names, separated by commas (e.g., torch,snntorch,matplotlib).
         - Do NOT include explanations, markdown, quotes, or code fences.
         - Exclude standard library modules (e.g., sys, os, typing).
-        - Only include packages that are directly mentioned in the import statements.
-        - Preserve order as much as possible.
+        - Only include packages that are explicitly imported (e.g., for `import numpy as np`, return `numpy`).
+        - In `from x import y` statements, include only `x`.
+        - Preserve the order in which packages appear.
+        - Ignore relative imports and local files.
+        
+
 
         ### Imports:
         {import_block}
@@ -765,19 +770,30 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
     Check code in a sandbox with dependency installation.
     """
 
-    #sandbox = Sandbox("OpenEvalsPython")
-    sandbox = Sandbox()
-
-    # SandBox metrics are in a private beta for now
-    # metrics = sandbox.get_metrics() 
-    # print("Sandbox metrics:", metrics)
 
     imports = state.code_generation.imports or ""
     print("Imports to give to extract_packages:", imports)
     code = state.code_generation.code or ""
     combined_code = f"{imports}\n{code}"
 
-    # Step 1: Extract dependencies via LLM
+
+    sandbox_pyright = Sandbox("OpenEvalsPython") # already with pyright and uv installed
+
+    # Static type check
+    evaluator_pyright = create_e2b_pyright_evaluator(sandbox=sandbox_pyright)
+    eval_result_pyright = evaluator_pyright(outputs=combined_code)
+    print("Pyright result:", eval_result_pyright)
+
+    
+    sandbox_execution = Sandbox() # with this use sbx.run_code
+
+    # SandBox metrics are in a private beta for now
+    # metrics = sandbox.get_metrics() 
+    # print("Sandbox metrics:", metrics)
+
+    
+
+    # Extract dependencies via LLM
     try:
         packages = extract_packages_from_imports(imports)
         print("Inferred packages:", packages)
@@ -785,21 +801,20 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
         print("Fallback to empty package list due to error:", e)
         packages = []
 
-    # Step 2: Install packages
+    # Install packages
     for pkg in packages:
         print(f"Installing {pkg} in sandbox...")
-        result = sandbox.commands.run(f"pip install {pkg}", timeout=0)
+        result = sandbox_execution.commands.run(f"pip install {pkg}", timeout=0)
         print(result.stdout or result.stderr)
 
-    # Step 3: Static type check
-    evaluator_pyright = create_e2b_pyright_evaluator(sandbox=sandbox)
-    eval_result_pyright = evaluator_pyright(outputs=combined_code)
-    print("Pyright result:", eval_result_pyright)
+   
 
-    # Step 4: Execution check
-    evaluator_exec = create_e2b_execution_evaluator(sandbox=sandbox)
+    # Execution check
+    evaluator_exec = create_e2b_execution_evaluator(sandbox=sandbox_execution)
     eval_result_execution = evaluator_exec(outputs=combined_code)
     print("Execution result:", eval_result_execution)
+
+    
 
     return {
         "sandbox_feedback_pyright": eval_result_pyright,
