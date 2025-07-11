@@ -639,7 +639,7 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState) ->
 
     parser_query = code_parser_instructions + " " + response_text
     
-    response = agent.run(parser_query)
+    response = agent_parser.run(parser_query)
     print("RAW PARSER RESPONSE TEXT:\n", repr(response.content))
     response_text = response.content
     parsed_response = json.loads(response_text)
@@ -708,48 +708,52 @@ import json
 
 def extract_packages_from_imports(import_block: str):
     """
-    Use LLM to extract pip-installable packages from import block.
+    Use LLM to extract pip-installable packages from import block as a comma-separated string.
     """
     print("Extracting packages from imports...", import_block)
 
-    # Format the prompt correctly with the actual imports
-    prompt = f"""
-You are given a block of Python import statements.
+    prompt_template = """
+        You are given a block of Python import statements.
 
-Your task is to return ONLY a valid JSON list of the pip packages required to run the code.
+        Your task is to return ONLY the pip-installable package names as a single comma-separated string.
 
-### Instructions:
-- Output ONLY a valid JSON array (e.g., ["torch", "snntorch", "matplotlib"]).
-- Do NOT include any commentary, explanation, markdown formatting, or code fences.
-- If a module is part of the Python standard library (e.g., sys, os), exclude it.
-- Do NOT deduplicate or guess extra packages not directly mentioned.
+        ### Instructions:
+        - Output ONLY the package names, separated by commas (e.g., torch,snntorch,matplotlib).
+        - Do NOT include explanations, markdown, quotes, or code fences.
+        - Exclude standard library modules (e.g., sys, os, typing).
+        - Only include packages that are directly mentioned in the import statements.
+        - Preserve order as much as possible.
 
-### Imports:
-{import_block}
-""".strip()
-
+        ### Imports:
+        {import_block}
+        """
+    prompt = prompt_template.format(import_block=import_block)
 
     agent = Agent(
-        model="mistral-nemo",
+        model=Ollama(id="mistral-nemo"),
         tools=[],
         show_tool_calls=False,
-        #structured_outputs=json
+        use_json_mode=False,
     )
 
     try:
         response = agent.run(prompt)
         print("RAW RESPONSE TEXT PACKAGES EXTRACTOR:\n", response)
 
-        if hasattr(response, "content"):
-            response_text = response.content
-        else:
-            response_text = str(response)
+        response_text = response.content if hasattr(response, "content") else str(response)
 
-        return json.loads(response_text)
+        # Remove code fences and cleanup
+        if "```" in response_text:
+            response_text = response_text.strip("` \n")
+
+        # Parse into clean list
+        package_list = [pkg.strip() for pkg in response_text.split(",") if pkg.strip()]
+        return package_list
 
     except Exception as e:
         print("Fallback to empty package list due to error:", e)
         return []
+
 
 
 
@@ -761,7 +765,9 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
     Check code in a sandbox with dependency installation.
     """
 
-    sandbox = Sandbox("OpenEvalsPython")
+    #sandbox = Sandbox("OpenEvalsPython")
+    sandbox = Sandbox()
+
     # SandBox metrics are in a private beta for now
     # metrics = sandbox.get_metrics() 
     # print("Sandbox metrics:", metrics)
@@ -782,7 +788,7 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
     # Step 2: Install packages
     for pkg in packages:
         print(f"Installing {pkg} in sandbox...")
-        result = sandbox.run(f"pip install {pkg}", timeout=0)
+        result = sandbox.commands.run(f"pip install {pkg}", timeout=0)
         print(result.stdout or result.stderr)
 
     # Step 3: Static type check
