@@ -613,6 +613,7 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState) ->
         documents=doc_splits,
         embedding=embedding_model,
         collection_name="code-rag",
+        persist_directory=None  # 👈 In-memory only, no persistence. Remove the line to make the embedding persistent.
     )
 
     # Retrieve
