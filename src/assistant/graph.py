@@ -1,6 +1,10 @@
 # langgraph dev --no-reload
 # to run without reloading
 
+import torch
+torch.cuda.empty_cache()
+
+
 import json
 import logging
 
@@ -535,16 +539,45 @@ code_parser_instructions = """\
 
 
 
-# Proper embedding wrapper for LangChain
+# # Proper embedding wrapper for LangChain
+# class SentenceTransformerEmbeddings(Embeddings):
+#     def __init__(self, model_name: str):
+#         self.model = SentenceTransformer(model_name, trust_remote_code=True, device="cuda") # change here if want to use "cuda" or "cpu"
+
+#     def embed_documents(self, texts):
+#         return self.model.encode(texts).tolist()
+
+#     def embed_query(self, text):
+#         return self.model.encode([text])[0].tolist()
 class SentenceTransformerEmbeddings(Embeddings):
     def __init__(self, model_name: str):
-        self.model = SentenceTransformer(model_name, trust_remote_code=True, device="cuda") # change here if want to use "cuda" or "cpu"
+        import os
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+        
+        self.model = SentenceTransformer(model_name, trust_remote_code=True, device="cuda")  # change to "cpu" if needed
 
     def embed_documents(self, texts):
-        return self.model.encode(texts).tolist()
+        import torch, gc
+        batch_size = 8  # You can tune this value depending on your GPU size (try 4 or 2 if you hit OOM)
+        embeddings = []
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i+batch_size]
+            gc.collect()
+            torch.cuda.empty_cache()
+            encoded = self.model.encode(
+                batch,
+                convert_to_numpy=True,
+                batch_size=batch_size,
+                show_progress_bar=False
+            )
+            embeddings.extend(encoded)
+        gc.collect()
+        torch.cuda.empty_cache()
+        return [emb.tolist() for emb in embeddings]
 
     def embed_query(self, text):
         return self.model.encode([text])[0].tolist()
+
 
 
 def generate_code(question: str, config: RunnableConfig, state: SummaryState) -> CodeOutput:
