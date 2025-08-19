@@ -970,11 +970,12 @@ def process_feedback(state: SummaryState, config: RunnableConfig):
 
     {{"response": "approve"}}
     {{"response": "regenerate"}}
+    {{"response": "evaluation"}}
 
     ### Definitions:
+    - Use **"evaluation"** if the user wants to perform an evaluation or if the user talks about to evaluate.
     - Use **"approve"** if the user is fully satisfied and wants to keep the code exactly as it is, with **no changes requested**.
     - Use **"regenerate"** if the user asks for **any modifications**, **improvements**, or expresses **dissatisfaction** with the current code.
-    - Use **"evaluation"** if the user wants to perform an evaluation or if the user talks about to evaluate.
     Only return the JSON object — do not include any other text, explanations, or logs.
     """
 
@@ -999,7 +1000,7 @@ def process_feedback(state: SummaryState, config: RunnableConfig):
         parsed = json.loads(response_text)
         action = parsed.get("response", "regenerate").lower()
 
-        if action not in {"regenerate", "approve"}:
+        if action not in {"regenerate", "approve", "evaluation"}:
             action = "regenerate"
 
     except Exception as e:
@@ -1010,6 +1011,93 @@ def process_feedback(state: SummaryState, config: RunnableConfig):
     return {"user_feedback_processed": action}
 
 
+
+def collect_feedback_evaluation(state: SummaryState, config: RunnableConfig):
+    print("---COLLECTING FEEDBACK FOR EVALUATION FROM USER---")
+
+    feedback_prompt = {
+        "instruction": "Please insert the code to compare the generated code with.",
+        "code_review": {
+            "prefix": state.code_generation.prefix,
+            "imports": state.code_generation.imports,
+            "code": state.code_generation.code,
+        }
+    }
+
+    interrupt(feedback_prompt)
+
+
+
+
+
+def process_feedback_evaluation(state: SummaryState, config: RunnableConfig):
+    """Process the user feedback, produce the codes to compare with the same inputs"""
+    import json
+
+    print("---NORMALIZING GENERATED CODE AND REFERENCE CODE---")
+    print("\nstate in process feedback:", state)
+
+    agent = Agent(
+        model=Ollama(id="deepseek-r1"),
+        tools=[],
+        show_tool_calls=False,
+        structured_outputs=True,
+    )
+
+    prompt = f"""
+You are a code normalization assistant.
+
+You are given two Python code snippets:
+
+<<GENERATED>>
+{state.code_generation.code}
+<<END_GENERATED>>
+
+<<REFERENCE>>
+{state.research_topic}
+<<END_REFERENCE>>
+
+Task:
+
+- Produce ONE self-contained Python script as output.
+- The script must contain two clear sections:
+    ### Normalized generated
+    <python code adapted from generated snippet>
+
+    ### Normalized reference
+    <python code adapted from reference snippet>
+- Both sections MUST:
+    * Define and use the SAME constant TOY_INPUT = <toy_input>.
+    * If one code cannot directly accept TOY_INPUT, ADAPT it (e.g., by adding conversions or reshaping) so both work with exactly the same TOY_INPUT.
+- IMPORTANT: Return ONLY the Python script text. 
+  No JSON wrapping, no markdown fences (```), no extra commentary.
+  """
+
+    script_str = ""
+
+    try:
+        response = agent.run(prompt)
+        script_str = getattr(response, "content", str(response))
+
+        # Remove <think> artifacts
+        while "<think>" in script_str and "</think>" in script_str:
+            start = script_str.find("<think>")
+            end = script_str.find("</think>") + len("</think>")
+            script_str = script_str[:start] + script_str[end:]
+
+        # Remove ``` fences if the model added them
+        script_str = script_str.strip()
+        if script_str.startswith("```"):
+            script_str = script_str.strip("`")
+            # sometimes comes like ```python\n...\n```
+            script_str = script_str.replace("python\n", "", 1).strip()
+
+    except Exception as e:
+        print("Error while running normalization agent:", e)
+        print(traceback.format_exc())
+        script_str = ""
+
+    return {"code": script_str}
 
 
 
@@ -1141,8 +1229,6 @@ builder.add_node("generate_academic_query", generate_academic_query)
 # Add nodes for code generation and code checking
 builder.add_node("search_relevant_sources", search_relevant_sources)
 
-
-
 builder.add_node("generate", generate)  # generation solution
 #builder.add_node("check_code", code_check)  # check code
 #builder.add_node("continue_generation", continue_generation)
@@ -1152,8 +1238,13 @@ builder.add_node("check_code_sandbox", check_code_sandbox)  # check code in sand
 builder.add_node("reflection", reflection)  # reflect on code
 builder.add_node("evaluation", evaluation) # perform a systematic evaluation with groud truth code
 
+builder.add_node("collect_feedback_evaluation", collect_feedback_evaluation)  # collect feedback for evaluation
+builder.add_node("process_feedback_evaluation", process_feedback_evaluation)  # process feedback for evaluation
+
 # Add edges
 builder.add_edge(START, "route_question")
+
+
 builder.add_edge("generate_query", "web_research")
 builder.add_conditional_edges(
     "route_question",
@@ -1179,8 +1270,8 @@ builder.add_edge("summarize_academic_sources", END)
 
 builder.add_edge("search_relevant_sources", "generate")
 
-builder.add_edge("generate", "check_code_sandbox")
-#builder.add_edge("generate", "collect_feedback")
+#builder.add_edge("generate", "check_code_sandbox")
+builder.add_edge("generate", "collect_feedback")
 
 builder.add_edge("check_code_sandbox", "reflection")
 
@@ -1195,11 +1286,13 @@ builder.add_conditional_edges(
     {
         "regenerate": "generate",
         "approve": END,
-        "evaluation": "evaluation"
+        "evaluation": "collect_feedback_evaluation",
     },
 )
 
-builder.add_edge("evaluation", END)
+builder.add_edge("collect_feedback_evaluation", "process_feedback_evaluation")
+#builder.add_edge("evaluation", END)
+builder.add_edge("process_feedback_evaluation", END)
 
 
 
