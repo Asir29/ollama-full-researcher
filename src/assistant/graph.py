@@ -1030,7 +1030,7 @@ def collect_feedback_evaluation(state: SummaryState, config: RunnableConfig):
 
 
 
-def process_feedback_evaluation(state: SummaryState, config: RunnableConfig):
+def code_normalization(state: SummaryState, config: RunnableConfig):
     """Process the user feedback, produce the codes to compare with the same inputs"""
     import json
 
@@ -1069,7 +1069,12 @@ Task:
 - Both sections MUST:
     * Define and use the SAME constant TOY_INPUT = <toy_input>.
     * If one code cannot directly accept TOY_INPUT, ADAPT it (e.g., by adding conversions or reshaping) so both work with exactly the same TOY_INPUT.
-- IMPORTANT: Return ONLY the Python script text. 
+- IMPORTANT: Return ONLY the Python script text.
+- At the end of the script:
+    * Add code that runs both normalized functions on TOY_INPUT.
+    * Print both results clearly, in the format:
+      Generated output: <value>
+      Reference output: <value>
   No JSON wrapping, no markdown fences (```), no extra commentary.
   """
 
@@ -1239,7 +1244,7 @@ builder.add_node("reflection", reflection)  # reflect on code
 builder.add_node("evaluation", evaluation) # perform a systematic evaluation with groud truth code
 
 builder.add_node("collect_feedback_evaluation", collect_feedback_evaluation)  # collect feedback for evaluation
-builder.add_node("process_feedback_evaluation", process_feedback_evaluation)  # process feedback for evaluation
+builder.add_node("code_normalization", code_normalization)  # process feedback for evaluation
 
 # Add edges
 builder.add_edge(START, "route_question")
@@ -1290,9 +1295,9 @@ builder.add_conditional_edges(
     },
 )
 
-builder.add_edge("collect_feedback_evaluation", "process_feedback_evaluation")
+builder.add_edge("collect_feedback_evaluation", "code_normalization")
 #builder.add_edge("evaluation", END)
-builder.add_edge("process_feedback_evaluation", END)
+builder.add_edge("code_normalization", END)
 
 
 
