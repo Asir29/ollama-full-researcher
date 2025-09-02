@@ -929,19 +929,42 @@ def decide_to_finish(state: SummaryState):
         return "generate"
 
 
+# def collect_feedback(state: SummaryState, config: RunnableConfig):
+#     print("---COLLECTING FEEDBACK FROM USER---")
+
+#     feedback_prompt = {
+#         "instruction": "Please review the code and choose: approve, regenerate. Then explain your decision.",
+#         "code_review": {
+#             "prefix": state.code_generation.prefix,
+#             "imports": state.code_generation.imports,
+#             "code": state.code_generation.code,
+#         }
+#     }
+
+#     feed = interrupt(feedback_prompt)
+    
+#     print("---FEEDBACK COLLECTED--", feed)
+#     print("\n")
+
 def collect_feedback(state: SummaryState, config: RunnableConfig):
     print("---COLLECTING FEEDBACK FROM USER---")
 
     feedback_prompt = {
-        "instruction": "Please review the code and choose: approve, regenerate. Then explain your decision.",
-        "code_review": {
-            "prefix": state.code_generation.prefix,
-            "imports": state.code_generation.imports,
-            "code": state.code_generation.code,
-        }
+        "instruction": "Please review the code and choose: approve, regenerate or evaluate with a reference code. Then explain your decision.",
+        "prefix": state.code_generation.prefix,
+        "imports": state.code_generation.imports,
+        "code": state.code_generation.code,
     }
 
-    interrupt(feedback_prompt)
+    # This pauses execution and will show editable fields
+    user_input = interrupt(feedback_prompt)
+
+    # Return the user edits into state
+    return {
+        "user_feedback": user_input
+    }
+
+
 
 
 
@@ -1102,7 +1125,74 @@ Task:
         print(traceback.format_exc())
         script_str = ""
 
-    return {"code": script_str}
+    state.normalized_code = script_str
+    return {"normalized_code": script_str}
+
+def collect_feedback_normalization(state: SummaryState, config: RunnableConfig):
+    print("---COLLECTING FEEDBACK FOR NORMALIZATION FROM USER---")
+    feedback_prompt = {
+        "instruction": "Please review the normalized code and instert any corrections if needed.",
+        "normalized_code": state.normalized_code
+    }
+    interrupt(feedback_prompt)
+
+
+def process_feedback_normalization(state: SummaryState, config: RunnableConfig):
+    """
+    Process the user feedback for normalization
+    """
+    print("---PROCESSING FEEDBACK DECISION FOR NORMALIZATION---")
+
+    agent = Agent(
+        model=Ollama(id="deepseek-r1"),
+        tools=[],
+        show_tool_calls=False,
+        structured_outputs=True,
+    )
+
+    prompt = f"""
+    You are a code fixer.
+
+    You are given user feedback: {state.research_topic}
+
+    Based on this feedback, understand if the user wants to proceed with evaluation or wants to modify the normalization code.
+    If the user wants to modify the normalization code, add the modifications to the code.
+    The code to modify is the following:
+    {state.normalized_code}
+    
+
+    Only return the JSON object — do not include any other text, explanations, or logs:
+    Insert the full code, implementing the required modifications, in the following JSON format:
+
+    {{"fixed_code": "<full modified code here>"}}
+    """
+
+    try:
+        response = agent.run(prompt)
+        response_text = getattr(response, "content", str(response))
+        print(f"RAW DECISION RESPONSE: {response_text}")
+
+        # Remove <think> tags from the response
+        while "<think>" in response_text and "</think>" in response_text:
+            start = response_text.find("<think>")
+            end = response_text.find("</think>") + len("</think>")
+            response_text = response_text[:start] + response_text[end:]
+
+        print(f"RESPONSE TEXT: {response_text}")
+
+        # Parse the JSON response
+        parsed = json.loads(response_text)
+        fixed_code = parsed.get("fixed_code", "")
+        print(f"FIXED CODE: {fixed_code}")
+
+        return {"fixed_code": fixed_code}
+
+    except json.JSONDecodeError as e:
+        print(f"Error parsing JSON response: {e}")
+        return {"fixed_code": ""}
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return {"fixed_code": ""}
 
 
 
@@ -1246,7 +1336,10 @@ builder.add_node("evaluation", evaluation) # perform a systematic evaluation wit
 builder.add_node("collect_feedback_evaluation", collect_feedback_evaluation)  # collect feedback for evaluation
 builder.add_node("code_normalization", code_normalization)  # process feedback for evaluation
 
-# Add edges
+builder.add_node("collect_feedback_normalization", collect_feedback_normalization) # collect feedback for normalization
+builder.add_node("process_feedback_normalization", process_feedback_normalization) # process feedback for normalization
+
+########################## EGDES ##########################
 builder.add_edge(START, "route_question")
 
 
@@ -1297,7 +1390,9 @@ builder.add_conditional_edges(
 
 builder.add_edge("collect_feedback_evaluation", "code_normalization")
 #builder.add_edge("evaluation", END)
-builder.add_edge("code_normalization", END)
+builder.add_edge("code_normalization", "collect_feedback_normalization")
+builder.add_edge("collect_feedback_normalization", "process_feedback_normalization")
+builder.add_edge("process_feedback_normalization", END)
 
 
 
