@@ -1,13 +1,20 @@
-#export E2B_API_KEY="e2b_4590f83de28112a9bd68eb920f368104fff15706"
-
+API_KEY="e2b_a913ba6f51c06f526eeef2de8b5b5a40f6372f9c"
 
 from e2b_code_interpreter import Sandbox
+
 from openevals.code.e2b.execution import create_e2b_execution_evaluator
 
-sbx = Sandbox()
+
+# Your template ID from the previous step
+template_id = 'k0wmnzir0zuzye6dndlw' 
+# Pass the template ID to the `Sandbox.create` method
+sbx = Sandbox(template_id) 
+#sbx = Sandbox(api_key=API_KEY)
+
+#sbx.commands.run("python -m pip install --upgrade pip", timeout=0)
 
 # Install torch with no timeout
-sbx.commands.run("pip install torch snntorch", timeout=0)
+sbx.commands.run("pip install torch", timeout=0)
 
 
 evaluator = create_e2b_execution_evaluator(sandbox=sbx)
