@@ -739,7 +739,6 @@ def generate(state: SummaryState, config: RunnableConfig):
     return {"code_generation": code_solution} #, "user_feedback": state.user_feedback
 
 
-import json
 
 def extract_packages_from_imports(import_block: str):
     """
@@ -1162,7 +1161,7 @@ def process_feedback_normalization(state: SummaryState, config: RunnableConfig):
     
 
     Only return the JSON object — do not include any other text, explanations, or logs:
-    Insert the full code, implementing the required modifications, in the following JSON format:
+    Insert the full code (imports and the executable code), implementing the required modifications, in the following JSON format:
 
     {{"fixed_code": "<full modified code here>"}}
     """
