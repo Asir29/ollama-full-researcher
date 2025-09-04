@@ -1,4 +1,3 @@
-API_KEY="e2b_a913ba6f51c06f526eeef2de8b5b5a40f6372f9c"
 
 from e2b_code_interpreter import Sandbox
 
@@ -8,7 +7,7 @@ from openevals.code.e2b.execution import create_e2b_execution_evaluator
 # Your template ID from the previous step
 template_id = 'k0wmnzir0zuzye6dndlw' 
 # Pass the template ID to the `Sandbox.create` method
-sbx = Sandbox(template_id) 
+sbx = Sandbox.create(api_key=API_KEY, template_id = template_id) 
 #sbx = Sandbox(api_key=API_KEY)
 
 #sbx.commands.run("python -m pip install --upgrade pip", timeout=0)
