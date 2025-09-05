@@ -818,14 +818,19 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
     print("Pyright result:", eval_result_pyright)
 
     
-    sandbox_execution = Sandbox() # with this use sbx.run_code
+    sandbox_execution = Sandbox().create() # with this use sbx.run_code
+
+    #sandbox_execution.commands.run("python -m pip install --upgrade pip", timeout=0)
+
+    # OPTIONAL PACKAGES TO SUPPORT THE SMALL MEMORY RESOURCES OF THE DEFAULT SANDBOX (currently 1GB)
+    # Install torch with no timeout 
+    #sandbox_execution.commands.run("pip install torch --index-url https://download.pytorch.org/whl/cpu", timeout=0)
 
     # SandBox metrics are in a private beta for now
     # metrics = sandbox.get_metrics() 
     # print("Sandbox metrics:", metrics)
 
     
-
     # Extract dependencies via LLM
     try:
         packages = extract_packages_from_imports(imports)
@@ -1154,22 +1159,27 @@ def process_feedback_normalization(state: SummaryState, config: RunnableConfig):
 
     You are given user feedback: {state.research_topic}
 
-    Based on this feedback, understand if the user wants to proceed with evaluation or wants to modify the normalization code.
-    If the user wants to modify the normalization code, add the modifications to the code.
-    The code to modify is the following:
+    Based on this feedback, modify the normalization code as needed.
+
+    The code to modify is:
     {state.normalized_code}
-    
 
-    Only return the JSON object — do not include any other text, explanations, or logs:
-    Insert the full code (imports and the executable code), implementing the required modifications, in the following JSON format:
+    Return **only a JSON object** with a single key "fixed_code". The value must:
+    - Contain the full Python code including imports and executable functions.
+    - Escape all double quotes (\") and backslashes (\\) so the JSON is valid.
+    - Optionally, use single quotes in Python strings to minimize escaping issues.
+    - Not include any extra text, explanations, or logs.
 
-    {{"fixed_code": "<full modified code here>"}}
+    Format exactly as:
+    {{"fixed_code": "<escaped full modified code here>"}}
     """
+
+
 
     try:
         response = agent.run(prompt)
         response_text = getattr(response, "content", str(response))
-        print(f"RAW DECISION RESPONSE: {response_text}")
+        #print(f"RAW DECISION RESPONSE: {response_text}")
 
         # Remove <think> tags from the response
         while "<think>" in response_text and "</think>" in response_text:
@@ -1184,7 +1194,7 @@ def process_feedback_normalization(state: SummaryState, config: RunnableConfig):
         fixed_code = parsed.get("fixed_code", "")
         print(f"FIXED CODE: {fixed_code}")
 
-        return {"fixed_code": fixed_code}
+        
 
     except json.JSONDecodeError as e:
         print(f"Error parsing JSON response: {e}")
@@ -1193,6 +1203,7 @@ def process_feedback_normalization(state: SummaryState, config: RunnableConfig):
         print(f"An error occurred: {e}")
         return {"fixed_code": ""}
 
+    return {"fixed_code": fixed_code}
 
 
 
