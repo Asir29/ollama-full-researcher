@@ -1089,21 +1089,22 @@ Task:
 - Produce ONE self-contained Python script as output.
 - The script must contain two clear sections:
     ### Normalized generated
-    <python code adapted from generated snippet>
+    <Python code adapted from the generated snippet>
 
     ### Normalized reference
-    <python code adapted from reference snippet>
+    <Python code adapted from the reference snippet>
 - Both sections MUST:
-    * Define and use the SAME constant TOY_INPUT = <toy_input>.
-    * If one code cannot directly accept TOY_INPUT, ADAPT it (e.g., by adding conversions or reshaping) so both work with exactly the same TOY_INPUT.
-- IMPORTANT: Return ONLY the Python script text.
+    * Define and use the SAME constant TOY_INPUT.
+    * If one code cannot directly accept TOY_INPUT, ADAPT it (e.g., reshaping, type conversion) so both work with exactly the same TOY_INPUT.
 - At the end of the script:
-    * Add code that runs both normalized functions on TOY_INPUT.
-    * Print both results clearly, in the format:
+    * Instantiate any classes or functions needed.
+    * Run both normalized sections on TOY_INPUT.
+    * Print both outputs clearly, in the format:
       Generated output: <value>
       Reference output: <value>
-  No JSON wrapping, no markdown fences (```), no extra commentary.
-  """
+- Do NOT include JSON, markdown fences, or extra explanation.
+- Ensure the output is pure, executable Python code with the requested sections.
+"""
 
     script_str = ""
 
@@ -1129,21 +1130,26 @@ Task:
         print(traceback.format_exc())
         script_str = ""
 
+    print("NORMALIZED CODE:\n", script_str)
     state.normalized_code = script_str
     return {"normalized_code": script_str}
 
 def collect_feedback_normalization(state: SummaryState, config: RunnableConfig):
     print("---COLLECTING FEEDBACK FOR NORMALIZATION FROM USER---")
     feedback_prompt = {
-        "instruction": "Please review the normalized code and instert any corrections if needed.",
+        "instruction": "Please review the normalized code and insert any corrections if needed.",
         "normalized_code": state.normalized_code
     }
     interrupt(feedback_prompt)
 
 
+
+
 def process_feedback_normalization(state: SummaryState, config: RunnableConfig):
     """
-    Process the user feedback for normalization
+    Process the user feedback for normalization.
+    Ensures the returned result is always valid JSON with a 'fixed_code' field
+    containing a Python code block.
     """
     print("---PROCESSING FEEDBACK DECISION FOR NORMALIZATION---")
 
@@ -1164,46 +1170,53 @@ def process_feedback_normalization(state: SummaryState, config: RunnableConfig):
     The code to modify is:
     {state.normalized_code}
 
-    Return **only a JSON object** with a single key "fixed_code". The value must:
-    - Contain the full Python code including imports and executable functions.
-    - Escape all double quotes (\") and backslashes (\\) so the JSON is valid.
-    - Optionally, use single quotes in Python strings to minimize escaping issues.
-    - Not include any extra text, explanations, or logs.
+    Return ONLY a JSON object with a single key "fixed_code".
+    The value should be a **Python code block** formatted as:
 
-    Format exactly as:
-    {{"fixed_code": "<escaped full modified code here>"}}
+    ```python
+    <full Python code here>
+    ```
     """
-
-
 
     try:
         response = agent.run(prompt)
         response_text = getattr(response, "content", str(response))
-        #print(f"RAW DECISION RESPONSE: {response_text}")
 
-        # Remove <think> tags from the response
+        # Remove <think> tags if present
         while "<think>" in response_text and "</think>" in response_text:
             start = response_text.find("<think>")
             end = response_text.find("</think>") + len("</think>")
             response_text = response_text[:start] + response_text[end:]
 
-        print(f"RESPONSE TEXT: {response_text}")
+        # Strip markdown code fences
+        cleaned = response_text.strip()
+        if cleaned.startswith("```"):
+            cleaned = "\n".join(
+                line for line in cleaned.splitlines() if not line.startswith("```")
+            ).strip()
 
-        # Parse the JSON response
-        parsed = json.loads(response_text)
-        fixed_code = parsed.get("fixed_code", "")
-        print(f"FIXED CODE: {fixed_code}")
+        fixed_code = ""
+        try:
+            # Try to parse as JSON
+            parsed = json.loads(cleaned)
+            fixed_code = parsed.get("fixed_code", "")
+        except json.JSONDecodeError:
+            # If it's raw code, wrap it into valid JSON with Python code block
+            fixed_code = f"```python\n{cleaned}\n```"
+            cleaned = json.dumps({"fixed_code": fixed_code})
+            parsed = json.loads(cleaned)
+            fixed_code = parsed["fixed_code"]
 
-        
+        print(f"FIXED CODE:\n{fixed_code}")  # Display with code block
 
-    except json.JSONDecodeError as e:
-        print(f"Error parsing JSON response: {e}")
-        return {"fixed_code": ""}
     except Exception as e:
         print(f"An error occurred: {e}")
         return {"fixed_code": ""}
 
+    state.fixed_code = fixed_code
     return {"fixed_code": fixed_code}
+
+
 
 
 
