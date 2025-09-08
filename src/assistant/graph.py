@@ -685,11 +685,17 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState) ->
     if isinstance(imports_str, list):
         imports_str = "\n".join(imports_str)
 
+    # return CodeOutput(
+    #     prefix=parsed_response.get("prefix", ""),
+    #     imports=imports_str,
+    #     code=parsed_response.get("code", "")
+    # )
     return CodeOutput(
         prefix=parsed_response.get("prefix", ""),
-        imports=imports_str,
-        code=parsed_response.get("code", "")
+        imports=f"```python\n{imports_str}\n```",
+        code=f"```python\n{parsed_response.get('code', '')}\n```"
     )
+
 
 
 ## Function to generate code
@@ -1119,11 +1125,11 @@ Task:
             script_str = script_str[:start] + script_str[end:]
 
         # Remove ``` fences if the model added them
-        script_str = script_str.strip()
-        if script_str.startswith("```"):
-            script_str = script_str.strip("`")
-            # sometimes comes like ```python\n...\n```
-            script_str = script_str.replace("python\n", "", 1).strip()
+        # script_str = script_str.strip()
+        # if script_str.startswith("```"):
+        #     script_str = script_str.strip("`")
+        #     # sometimes comes like ```python\n...\n```
+        #     script_str = script_str.replace("python\n", "", 1).strip()
 
     except Exception as e:
         print("Error while running normalization agent:", e)
@@ -1171,11 +1177,7 @@ def process_feedback_normalization(state: SummaryState, config: RunnableConfig):
     {state.normalized_code}
 
     Return ONLY a JSON object with a single key "fixed_code".
-    The value should be a **Python code block** formatted as:
 
-    ```python
-    <full Python code here>
-    ```
     """
 
     try:
@@ -1213,7 +1215,9 @@ def process_feedback_normalization(state: SummaryState, config: RunnableConfig):
         print(f"An error occurred: {e}")
         return {"fixed_code": ""}
 
-    state.fixed_code = fixed_code
+    #state.fixed_code = fixed_code
+    state.fixed_code = f"```python\n{fixed_code}\n```"
+
     return {"fixed_code": fixed_code}
 
 
