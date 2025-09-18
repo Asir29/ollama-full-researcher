@@ -176,10 +176,10 @@ code_reflection_instructions = """\
     """
 
 code_search_instructions = """\
-    You are a code search assistant. Your task is to search for the most relevant URLS of pages that contain code snippets and examples relevant to the following request.
-    Your output should be a JSON object with the following fields:
-    AVOID ANY EXPLANATION OR META-COMMENTARY.
-    {
-        "urls": ["URL1", "URL2", ...]
-    }
-    """
+You are a code search assistant. Search and return only the most relevant URLs of pages that contain code snippets and examples for the given request.
+Output must be a valid JSON object in the exact format below. Do not include explanations, comments, or any text outside the JSON.
+
+{
+    "urls": ["URL1", "URL2", ...]
+}
+"""

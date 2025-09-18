@@ -111,7 +111,7 @@ async def route_question(state: SummaryState, config: RunnableConfig):
     # Send system and human messages
     result = await llm_json_mode.ainvoke([ 
         SystemMessage(content=router_instructions),
-        HumanMessage(content=f"Input: {state.research_topic}")
+        HumanMessage(content=f"Input: {state.research_topic}"),
     ])
 
     print(f"Routing result: {result.content}")
@@ -182,7 +182,7 @@ async def web_research(state: SummaryState, config: RunnableConfig):
     configurable = Configuration.from_runnable_config(config)
     # Search the web
     agent = Agent(
-        model=Ollama(id="mistral-nemo"),
+        model=Ollama(id="mistral:latest"),
         tools=[GoogleSearchTools()],
         show_tool_calls=False,
         markdown=True
@@ -191,7 +191,8 @@ async def web_research(state: SummaryState, config: RunnableConfig):
 
     query = web_search_instructions + "\n Search for the following query: " + state.search_query + "\n"
     #run_response = agent.run(query)
-    run_response = await agent.arun(query)  # ✅ Non-blocking!
+    #run_response = await agent.arun(query)  # ✅ Non-blocking!
+    run_response = await asyncio.to_thread(lambda: agent.run(query))
 
     content = run_response.content
 
@@ -582,7 +583,7 @@ class SentenceTransformerEmbeddings(Embeddings):
 
 def generate_code(question: str, config: RunnableConfig, state: SummaryState) -> CodeOutput:
     agent = Agent(
-        model=Ollama(id="codellama"),
+        model=Ollama(id="gpt-oss:20b"),
         tools=[],
         show_tool_calls=False,
         use_json_mode=True,
@@ -590,6 +591,8 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState) ->
 
     # Load URLs
     data = json.loads(state.urls or "{}" )
+    print(data)
+
     urls = data["urls"]
     print(f"URLs: {urls}")
 
@@ -643,7 +646,7 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState) ->
 
     # Parse result with LLM
     agent_parser = Agent(
-        model=Ollama(id="codellama"),
+        model=Ollama(id="gpt-oss:20b"),
         tools=[],
         show_tool_calls=False,
         use_json_mode=True,
@@ -774,7 +777,7 @@ def extract_packages_from_imports(import_block: str):
     prompt = prompt_template.format(import_block=import_block)
 
     agent = Agent(
-        model=Ollama(id="mistral-nemo"),
+        model=Ollama(id="mistral:latest"),
         tools=[],
         show_tool_calls=False,
         use_json_mode=False,
@@ -812,19 +815,23 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
 
     imports = state.code_generation.imports or ""
     print("Imports to give to extract_packages:", imports)
-    code = state.code_generation.code or ""
-    combined_code = f"{imports}\n{code}"
+    #code = state.code_generation.code or ""
+    
+    combined_code = state.fixed_code.replace("```python\n", "").replace("\n```", "") # remove markdown formatting if any
+    #combined_code = f"{imports}\n{code}"
 
 
-    sandbox_pyright = Sandbox("OpenEvalsPython") # already with pyright and uv installed
+    #sandbox_pyright = Sandbox.create("OpenEvalsPython") # already with pyright and uv installed
+
+    sandbox_execution = Sandbox.create() # with this use sbx.run_code
 
     # Static type check
-    evaluator_pyright = create_e2b_pyright_evaluator(sandbox=sandbox_pyright)
-    eval_result_pyright = evaluator_pyright(outputs=combined_code)
-    print("Pyright result:", eval_result_pyright)
+    # evaluator_pyright = create_e2b_pyright_evaluator(sandbox=sandbox_execution)#sandbox_pyright)
+    # eval_result_pyright = evaluator_pyright(outputs=combined_code)
+    # print("Pyright result:", eval_result_pyright)
 
     
-    sandbox_execution = Sandbox().create() # with this use sbx.run_code
+    
 
     #sandbox_execution.commands.run("python -m pip install --upgrade pip", timeout=0)
 
@@ -848,8 +855,12 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
     # Install packages
     for pkg in packages:
         print(f"Installing {pkg} in sandbox...")
-        result = sandbox_execution.commands.run(f"pip install {pkg}", timeout=0)
-        print(result.stdout or result.stderr)
+
+        if pkg in ["torch"]:
+            sandbox_execution.commands.run("pip install torch --index-url https://download.pytorch.org/whl/cpu", timeout=0) # cpu version of  torch, lighter (the sandbox is 1GB)
+        else:
+            result = sandbox_execution.commands.run(f"pip install {pkg}", timeout=0)
+            print(result.stdout or result.stderr)
 
    
 
@@ -861,7 +872,7 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
     
 
     return {
-        "sandbox_feedback_pyright": eval_result_pyright,
+        #"sandbox_feedback_pyright": eval_result_pyright or "No pyright result",
         "sandbox_feedback_execution": eval_result_execution
     }
 
@@ -877,27 +888,27 @@ def reflection(state: SummaryState, config: RunnableConfig):
     print("---REFLECTING ON CODE---")
 
     # Check code
-    pyright_feedback = state.sandbox_feedback_pyright
+    #pyright_feedback = state.sandbox_feedback_pyright
     execution_feedback = state.sandbox_feedback_execution
-    print("PYRIGHT FEEDBACK:", pyright_feedback)
+    #print("PYRIGHT FEEDBACK:", pyright_feedback)
 
     #if(pyright_feedback['key'] == "pyright_succeeded" and execution_feedback['key'] == "execution_succeeded"):
     #    print("---NO ERRORS---")
     #    return {"route": "no_errors"}  # Return a dictionary
     
     agent = Agent(
-        model=Ollama(id="mistral-nemo"),
+        model=Ollama(id="mistral:latest"),
         tools=[],
         show_tool_calls=False,
         structured_outputs=True,
     )
 
     # Convert dictionaries to strings
-    pyright_feedback_str = json.dumps(pyright_feedback, indent=2)
+    #pyright_feedback_str = json.dumps(pyright_feedback, indent=2)
     execution_feedback_str = json.dumps(execution_feedback, indent=2)
 
     # Construct the query using f-strings for better readability
-    query = code_reflection_instructions + "\n" + pyright_feedback_str + "\n" + execution_feedback_str
+    query = code_reflection_instructions + "\n"  + "\n" + execution_feedback_str #+ pyright_feedback_str
     response = agent.run(query)
 
     # Get the string content from RunResponse
@@ -1216,7 +1227,7 @@ def process_feedback_normalization(state: SummaryState, config: RunnableConfig):
         return {"fixed_code": ""}
 
     #state.fixed_code = fixed_code
-    state.fixed_code = f"```python\n{fixed_code}\n```"
+    #state.fixed_code = f"```python\n{fixed_code}\n```"
 
     return {"fixed_code": fixed_code}
 
@@ -1245,7 +1256,7 @@ def search_relevant_sources(state: SummaryState, config: RunnableConfig):
     configurable = Configuration.from_runnable_config(config)
     # Search the web
     agent = Agent(
-        model=Ollama(id="mistral-nemo"),
+        model=Ollama(id="mistral:latest"),
         tools=[GoogleSearchTools()],
         show_tool_calls=False,
         markdown=True
@@ -1263,64 +1274,64 @@ def search_relevant_sources(state: SummaryState, config: RunnableConfig):
     return {"urls": content}
 
 
-def evaluation(state: SummaryState, config: RunnableConfig):
-    """
-    Perform a systematic evaluation with ground truth code in an E2B sandbox.
-    """
-    print("---PERFORMING EVALUATION---")
+# def evaluation(state: SummaryState, config: RunnableConfig):
+#     """
+#     Perform a systematic evaluation with ground truth code in an E2B sandbox.
+#     """
+#     print("---PERFORMING EVALUATION---")
 
-    code_output = state.code_generation
-    imports = code_output.imports
-    code = code_output.code
+#     code_output = state.code_generation
+#     imports = code_output.imports
+#     code = code_output.code
 
-    # Extract packages from import lines
-    import_lines = imports.split("\n")
-    packages = set()
-    for line in import_lines:
-        line = line.strip()
-        if line.startswith("import "):
-            parts = line.split()
-            if len(parts) >= 2:
-                packages.add(parts[1].split(".")[0])
-        elif line.startswith("from "):
-            parts = line.split()
-            if len(parts) >= 2:
-                packages.add(parts[1].split(".")[0])
+#     # Extract packages from import lines
+#     import_lines = imports.split("\n")
+#     packages = set()
+#     for line in import_lines:
+#         line = line.strip()
+#         if line.startswith("import "):
+#             parts = line.split()
+#             if len(parts) >= 2:
+#                 packages.add(parts[1].split(".")[0])
+#         elif line.startswith("from "):
+#             parts = line.split()
+#             if len(parts) >= 2:
+#                 packages.add(parts[1].split(".")[0])
 
-    # Convert to pip install command
-    pip_cmd = "pip install " + " ".join(sorted(packages)) if packages else ""
+#     # Convert to pip install command
+#     pip_cmd = "pip install " + " ".join(sorted(packages)) if packages else ""
 
-    # Combine everything
-    executable_code = f"""
-    import subprocess
-    import sys
+#     # Combine everything
+#     executable_code = f"""
+#     import subprocess
+#     import sys
 
-    # Install necessary packages
-    subprocess.run([sys.executable, "-m", "pip", "install", {" ".join(repr(pkg) for pkg in packages)}])
+#     # Install necessary packages
+#     subprocess.run([sys.executable, "-m", "pip", "install", {" ".join(repr(pkg) for pkg in packages)}])
 
-    # --- Imports ---
-    {imports}
+#     # --- Imports ---
+#     {imports}
 
-    # --- Code ---
-    {code}
-        """.strip()
+#     # --- Code ---
+#     {code}
+#         """.strip()
 
-    # Now run the code in E2B sandbox
+#     # Now run the code in E2B sandbox
 
 
-    sandbox = Sandbox("OpenEvalsPython")
+#     sandbox = Sandbox("OpenEvalsPython")
 
-    # Optional: run pip install directly (if using SDK-level install)
-    # await sandbox.run(pip_cmd)
+#     # Optional: run pip install directly (if using SDK-level install)
+#     # await sandbox.run(pip_cmd)
 
-    evaluator = create_e2b_execution_evaluator(sandbox=sandbox)
+#     evaluator = create_e2b_execution_evaluator(sandbox=sandbox)
 
-    result = evaluator(outputs=executable_code)
+#     result = evaluator(outputs=executable_code)
 
-    print("EVALUATION RESULT:")
-    print(result)
+#     print("EVALUATION RESULT:")
+#     print(result)
 
-    return {"evaluation_result": result}
+#     return {"evaluation_result": result}
 
 
 
@@ -1358,7 +1369,7 @@ builder.add_node("collect_feedback", collect_feedback)
 builder.add_node("process_feedback", process_feedback)
 builder.add_node("check_code_sandbox", check_code_sandbox)  # check code in sandbox
 builder.add_node("reflection", reflection)  # reflect on code
-builder.add_node("evaluation", evaluation) # perform a systematic evaluation with groud truth code
+#builder.add_node("evaluation", evaluation) # perform a systematic evaluation with groud truth code
 
 builder.add_node("collect_feedback_evaluation", collect_feedback_evaluation)  # collect feedback for evaluation
 builder.add_node("code_normalization", code_normalization)  # process feedback for evaluation
@@ -1419,7 +1430,7 @@ builder.add_edge("collect_feedback_evaluation", "code_normalization")
 #builder.add_edge("evaluation", END)
 builder.add_edge("code_normalization", "collect_feedback_normalization")
 builder.add_edge("collect_feedback_normalization", "process_feedback_normalization")
-builder.add_edge("process_feedback_normalization", END)
+builder.add_edge("process_feedback_normalization", "check_code_sandbox")
 
 
 
