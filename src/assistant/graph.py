@@ -1082,7 +1082,7 @@ def code_normalization(state: SummaryState, config: RunnableConfig):
     print("\nstate in process feedback:", state)
 
     agent = Agent(
-        model=Ollama(id="deepseek-r1"),
+        model=Ollama(id="gpt-oss:20b"),#deepseek-r1
         tools=[],
         show_tool_calls=False,
         structured_outputs=True,
@@ -1130,10 +1130,10 @@ Task:
         script_str = getattr(response, "content", str(response))
 
         # Remove <think> artifacts
-        while "<think>" in script_str and "</think>" in script_str:
-            start = script_str.find("<think>")
-            end = script_str.find("</think>") + len("</think>")
-            script_str = script_str[:start] + script_str[end:]
+        # while "<think>" in script_str and "</think>" in script_str:
+        #     start = script_str.find("<think>")
+        #     end = script_str.find("</think>") + len("</think>")
+        #     script_str = script_str[:start] + script_str[end:]
 
         # Remove ``` fences if the model added them
         # script_str = script_str.strip()
@@ -1143,9 +1143,7 @@ Task:
         #     script_str = script_str.replace("python\n", "", 1).strip()
 
     except Exception as e:
-        print("Error while running normalization agent:", e)
-        print(traceback.format_exc())
-        script_str = ""
+        print(f"An error occurred: {e}")
 
     print("NORMALIZED CODE:\n", script_str)
     state.normalized_code = script_str
@@ -1171,7 +1169,7 @@ def process_feedback_normalization(state: SummaryState, config: RunnableConfig):
     print("---PROCESSING FEEDBACK DECISION FOR NORMALIZATION---")
 
     agent = Agent(
-        model=Ollama(id="deepseek-r1"),
+        model=Ollama(id="gpt-oss:20b"),#deepseek-r1
         tools=[],
         show_tool_calls=False,
         structured_outputs=True,
