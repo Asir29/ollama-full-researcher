@@ -83,6 +83,9 @@ from agno.models.ollama import Ollama
 import numpy as np
 import json
 
+from openevals.code.pyright import create_pyright_evaluator
+
+
 
 
 # Set up logging
@@ -749,11 +752,18 @@ def generate(state: SummaryState, config: RunnableConfig):
 
 
 
+import re
+
 def extract_packages_from_imports(import_block: str):
     """
     Use LLM to extract pip-installable packages from import block as a comma-separated string.
+    Ignores imports inside Python code fences.
     """
     print("Extracting packages from imports...", import_block)
+
+    # Remove any Python code blocks (```python ... ```)
+    pattern = r"```python.*?```"
+    cleaned_import_block = re.sub(pattern, "", import_block, flags=re.DOTALL).strip()
 
     prompt_template = """
         You are given a block of Python import statements.
@@ -768,13 +778,11 @@ def extract_packages_from_imports(import_block: str):
         - In `from x import y` statements, include only `x`.
         - Preserve the order in which packages appear.
         - Ignore relative imports and local files.
-        
-
 
         ### Imports:
         {import_block}
         """
-    prompt = prompt_template.format(import_block=import_block)
+    prompt = prompt_template.format(import_block=cleaned_import_block)
 
     agent = Agent(
         model=Ollama(id="mistral:latest"),
@@ -789,10 +797,6 @@ def extract_packages_from_imports(import_block: str):
 
         response_text = response.content if hasattr(response, "content") else str(response)
 
-        # Remove code fences and cleanup
-        if "```" in response_text:
-            response_text = response_text.strip("` \n")
-
         # Parse into clean list
         package_list = [pkg.strip() for pkg in response_text.split(",") if pkg.strip()]
         return package_list
@@ -800,6 +804,7 @@ def extract_packages_from_imports(import_block: str):
     except Exception as e:
         print("Fallback to empty package list due to error:", e)
         return []
+
 
 
 
@@ -822,6 +827,8 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
 
 
     #sandbox_pyright = Sandbox.create("OpenEvalsPython") # already with pyright and uv installed
+    static_evaluator = create_pyright_evaluator()
+
 
     sandbox_execution = Sandbox.create() # with this use sbx.run_code
 
@@ -829,6 +836,8 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
     # evaluator_pyright = create_e2b_pyright_evaluator(sandbox=sandbox_execution)#sandbox_pyright)
     # eval_result_pyright = evaluator_pyright(outputs=combined_code)
     # print("Pyright result:", eval_result_pyright)
+    static_evaluation_result = static_evaluator(outputs=combined_code)
+
 
     
     
@@ -869,11 +878,18 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
     eval_result_execution = evaluator_exec(outputs=combined_code)
     print("Execution result:", eval_result_execution)
 
+    # Direct execution in sandbox (outside evaluator)
+    run_result = sandbox_execution.run_code(combined_code)
+
+    print("=== STDOUT ===")
+    print(run_result)
+
     
 
     return {
-        #"sandbox_feedback_pyright": eval_result_pyright or "No pyright result",
+        "sandbox_feedback_pyright": static_evaluation_result or "No pyright result",
         "sandbox_feedback_execution": eval_result_execution
+        
     }
 
 
@@ -888,9 +904,9 @@ def reflection(state: SummaryState, config: RunnableConfig):
     print("---REFLECTING ON CODE---")
 
     # Check code
-    #pyright_feedback = state.sandbox_feedback_pyright
+    pyright_feedback = state.sandbox_feedback_pyright
     execution_feedback = state.sandbox_feedback_execution
-    #print("PYRIGHT FEEDBACK:", pyright_feedback)
+    print("PYRIGHT FEEDBACK:", pyright_feedback)
 
     #if(pyright_feedback['key'] == "pyright_succeeded" and execution_feedback['key'] == "execution_succeeded"):
     #    print("---NO ERRORS---")
@@ -904,11 +920,11 @@ def reflection(state: SummaryState, config: RunnableConfig):
     )
 
     # Convert dictionaries to strings
-    #pyright_feedback_str = json.dumps(pyright_feedback, indent=2)
+    pyright_feedback_str = json.dumps(pyright_feedback, indent=2)
     execution_feedback_str = json.dumps(execution_feedback, indent=2)
 
     # Construct the query using f-strings for better readability
-    query = code_reflection_instructions + "\n"  + "\n" + execution_feedback_str #+ pyright_feedback_str
+    query = code_reflection_instructions + "\n"  + "\n" + execution_feedback_str + pyright_feedback_str
     response = agent.run(query)
 
     # Get the string content from RunResponse
