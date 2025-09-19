@@ -45,6 +45,7 @@ class SummaryState:
     
     sandbox_feedback_pyright: str = field(default=None)
     sandbox_feedback_execution: str = field(default=None)
+    sandbox_execution_result: str = field(default=None)
 
     code_reflection: str = field(default=None)
 

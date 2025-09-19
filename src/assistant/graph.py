@@ -867,6 +867,8 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
 
         if pkg in ["torch"]:
             sandbox_execution.commands.run("pip install torch --index-url https://download.pytorch.org/whl/cpu", timeout=0) # cpu version of  torch, lighter (the sandbox is 1GB)
+        elif pkg in ["tensorflow"]:
+            sandbox_execution.commands.run("pip install --no-cache-dir tensorflow-cpu", timeout=0)
         else:
             result = sandbox_execution.commands.run(f"pip install {pkg}", timeout=0)
             print(result.stdout or result.stderr)
@@ -883,13 +885,14 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
 
     print("=== STDOUT ===")
     print(run_result)
-
+    
+    state.sandbox_execution_result = run_result
     
 
     return {
         "sandbox_feedback_pyright": static_evaluation_result or "No pyright result",
-        "sandbox_feedback_execution": eval_result_execution
-        
+        "sandbox_feedback_execution": eval_result_execution,
+        "sandbox_execution_result": run_result
     }
 
 
