@@ -47,7 +47,6 @@ from langchain_core.prompts import ChatPromptTemplate
 #from utils import get_prompt_code_assistant
 
 import re
-
 import textwrap
 
 from langgraph.types import Command
@@ -752,7 +751,6 @@ def generate(state: SummaryState, config: RunnableConfig):
 
 
 
-import re
 
 def extract_packages_from_imports(import_block: str):
     """
@@ -868,7 +866,9 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
         if pkg in ["torch"]:
             sandbox_execution.commands.run("pip install torch --index-url https://download.pytorch.org/whl/cpu", timeout=0) # cpu version of  torch, lighter (the sandbox is 1GB)
         elif pkg in ["tensorflow"]:
-            sandbox_execution.commands.run("pip install --no-cache-dir tensorflow-cpu", timeout=0)
+            sandbox_execution.commands.run("pip install --no-cache-dir tensorflow-cpu", timeout=0) # cpu version of tensorflow, lighter
+        elif pkg in ["sklearn"]:
+            sandbox_execution.commands.run("pip install scikit-learn", timeout=0) # sklearn is actually scikit-learn
         else:
             result = sandbox_execution.commands.run(f"pip install {pkg}", timeout=0)
             print(result.stdout or result.stderr)
@@ -1255,15 +1255,15 @@ def process_feedback_normalization(state: SummaryState, config: RunnableConfig):
 
 def search_relevant_sources(state: SummaryState, config: RunnableConfig):
     """
-    Search for relevant sources based on the user's request
+    Search for relevant sources to code based on the user's request
     """
     print("---SEARCHING RELEVANT SOURCES TO CODE---")
 
-    max_results = 2 # number of results to return
+    max_results = 3 # number of results to return
     include_raw_content = True
 
     # Customize config to not emit tool calls
-    config = copilotkit_customize_config(config, emit_tool_calls=False)
+    config = copilotkit_customize_config(config, emit_tool_calls=True)
     
     #await copilotkit_emit_message(config, json.dumps({
     #    "node": "search_relevant_sources",
@@ -1274,21 +1274,22 @@ def search_relevant_sources(state: SummaryState, config: RunnableConfig):
     # Search the web
     agent = Agent(
         model=Ollama(id="mistral:latest"),
-        tools=[GoogleSearchTools()],
-        show_tool_calls=False,
+        tools=[GoogleSearchTools()],#GoogleSearchTools
+        show_tool_calls=True,
         markdown=True
         
     )
 
-    query = code_search_instructions + "\n Search for the following query: " + state.research_topic + "\n"
-    #run_response = agent.run(query)
-    run_response = agent.run(query)  
 
+    query = code_search_instructions.format(research_topic=state.research_topic)# + "\n Search for the following query: " + state.research_topic + "\n"
+    run_response = agent.run(query)  
+    print("RAW SEARCH RESPONSE:\n", run_response)
     content = run_response.content
 
     print(f"Search results: {content}")
 
     return {"urls": content}
+
 
 
 # def evaluation(state: SummaryState, config: RunnableConfig):
