@@ -179,16 +179,15 @@ code_search_instructions = """\
 You are a code search assistant.
 
 Rules:
-- You MUST use the GoogleSearchTools tool to perform any search.
-- Do NOT generate or guess URLs yourself under any circumstances.
-- Only return URLs that come directly from the tool output.
-- The final response MUST be a single valid JSON object in this format:
+1. You MUST use the DuckDuck tool to find relevant urls.  
+   You are NOT allowed to generate or guess URLs under any circumstances.  
+   The only URLs you can return must come directly from the tool output.
+   If in the query there is a url, you MUST include it in the final response.
+2. The final response MUST be a single valid JSON object in this format:
 {{
     "urls": ["URL1", "URL2", ...]
 }}
-- Do NOT add explanations, markdown, code snippets, or any text outside the JSON.
-- If the query itself contains one or more URLs, they MUST be included in the "urls" list.
 
-The query is: {research_topic}
+Perform the search now for the following query: "{research_topic}"
 """
 

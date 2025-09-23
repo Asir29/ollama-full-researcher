@@ -17,6 +17,7 @@ Rules:
 1. You MUST use the DuckDuck tool to find relevant urls.  
    You are NOT allowed to generate or guess URLs under any circumstances.  
    The only URLs you can return must come directly from the tool output.
+   If in the query there is a url, you MUST include it in the final response.
 2. The final response MUST be a single valid JSON object in this format:
 {{
     "urls": ["URL1", "URL2", ...]
@@ -38,7 +39,7 @@ agent = Agent(
 )
 
 
-research_topic = "What are the latest advancements in spike neural networks for AI applications?"
+research_topic = "Code to build a basic spike neural network using documentation at https://snntorch.readthedocs.io/en/latest/index.html"
 
 query = code_search_instructions.format(research_topic=research_topic)# + "\n Search for the following query: " + state.research_topic + "\n"
 run_response = agent.run(query)  

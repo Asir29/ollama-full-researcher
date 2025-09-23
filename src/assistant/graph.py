@@ -33,6 +33,8 @@ from copilotkit.langgraph import copilotkit_emit_message, copilotkit_exit, copil
 from agno.agent import Agent
 from agno.tools.googlesearch import GoogleSearchTools
 from agno.tools.duckduckgo import DuckDuckGoTools
+from agno.tools.baidusearch import BaiduSearchTools
+
 from agno.models.ollama import Ollama
 from langchain_ollama import ChatOllama
 
@@ -628,7 +630,7 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState) ->
     print("CONTEXT:", context)
 
     # Construct query
-    query = code_assistant_instructions + "\n Based on the following context, generate the code that satisfies the question:" + "Context: " + context + "\nQuestion: " + state.research_topic + "\n" + "If the question is a request related to the previusly generated code, consider it when producing the response. In the following the previously generated code: " + state.imports + state.code
+    query = code_assistant_instructions + "\n Based on the following context, generate the code that satisfies the question:" + "Context: " + context + "\nQuestion: " + state.research_topic + "\n" + "If the question is a request related to the previusly generated code, consider also the previously generated code when producing the response. In the following the previously generated code: " + state.imports + state.code
 
     # Run agent
     response = agent.run(query)
@@ -732,8 +734,8 @@ def generate(state: SummaryState, config: RunnableConfig):
             "assistant",
             f"Here is my attempt to solve the problem:\n\n"
             f"Prefix:\n{code_solution.prefix}\n\n"
-            f"Imports:\n```\n{textwrap.dedent(code_solution.imports)}\n```\n\n"
-            f"Code:\n```\n{textwrap.dedent(code_solution.code)}\n```"
+            f"Imports:\n{code_solution.imports}\n\n"
+            f"Code:\n{code_solution.code}\n```"
            
         )
     ]
@@ -746,7 +748,7 @@ def generate(state: SummaryState, config: RunnableConfig):
 
 
     # Increment
-    state.code_iterations = state.code_iterations + 1
+    #state.code_iterations = state.code_iterations + 1
     return {"code_generation": code_solution} #, "user_feedback": state.user_feedback
 
 
@@ -1249,8 +1251,47 @@ def process_feedback_normalization(state: SummaryState, config: RunnableConfig):
     return {"fixed_code": fixed_code}
 
 
+def add_performance_metrics(state: SummaryState, config: RunnableConfig):
+    """
+    Add performance quality metrics to the code.
+    """
+    print("---ADDING METRICS TO CODE---")
 
+    agent = Agent(
+        model=Ollama(id="gpt-oss:20b"),
+        tools=[],
+        show_tool_calls=False,
+        structured_outputs=True,
+    )
 
+    prompt = f"""
+    You are given one or more PyTorch (or snnTorch) model implementations. 
+    Extend the code to include a performance evaluation section for each model. 
+    After running a forward pass with the provided toy input, print the following metrics:
+
+    1. **Execution time** of the forward pass:
+    - Use the `time` module to measure wall-clock time.
+    - If running on GPU, ensure to call `torch.cuda.synchronize()` before and after timing to get accurate results.
+
+    2. **Model parameters**:
+    - Report the total number of parameters.
+    - Report the number of trainable parameters.
+
+    3. **Memory usage**:
+    - If running on **CPU**, use the `psutil` library to measure RSS memory before and after the forward pass.
+    - If running on **GPU**, use `torch.cuda.max_memory_allocated()` to report the maximum memory usage in MB.
+
+    Print all metrics in a clear and comparable format for each model (e.g., "Generated Model" vs "Reference Model"). 
+    Use only ASCII characters in comments and code.
+    Do not remove or change the original forward pass logic — only add metric collection and reporting.
+    """
+    query= prompt + "\n" + state.fixed_code
+    run_response = agent.run(query)
+    print("RAW SEARCH RESPONSE:\n", run_response)
+    content = run_response.content
+
+    state.fixed_code = content
+    return {"fixed_code": content}
 
 
 def search_relevant_sources(state: SummaryState, config: RunnableConfig):
@@ -1259,24 +1300,18 @@ def search_relevant_sources(state: SummaryState, config: RunnableConfig):
     """
     print("---SEARCHING RELEVANT SOURCES TO CODE---")
 
-    max_results = 3 # number of results to return
-    include_raw_content = True
+    # Optional: use a working proxy if needed
+    google_tool = GoogleSearchTools(proxy=None)  # or proxy="http://your_proxy:port"
+    duck_tool = DuckDuckGoTools(fixed_max_results=3)
+    baidusearch_tool = BaiduSearchTools(fixed_max_results=3)
 
-    # Customize config to not emit tool calls
-    config = copilotkit_customize_config(config, emit_tool_calls=True)
-    
-    #await copilotkit_emit_message(config, json.dumps({
-    #    "node": "search_relevant_sources",
-    #    "content": f"Searching for: {state.search_query}"
-    #}))
-    
-    configurable = Configuration.from_runnable_config(config)
+
     # Search the web
     agent = Agent(
-        model=Ollama(id="mistral:latest"),
-        tools=[GoogleSearchTools()],#GoogleSearchTools
+        model=Ollama(id="qwen3:latest"),
+        tools=[duck_tool],#GoogleSearchTools
         show_tool_calls=True,
-        markdown=True
+        markdown=False
         
     )
 
@@ -1285,6 +1320,13 @@ def search_relevant_sources(state: SummaryState, config: RunnableConfig):
     run_response = agent.run(query)  
     print("RAW SEARCH RESPONSE:\n", run_response)
     content = run_response.content
+
+    # TODO: This is a hack to remove the <think> tags w/ Deepseek models 
+    # It appears very challenging to prompt them out of the responses 
+    while "<think>" in content and "</think>" in content:
+        start = content.find("<think>")
+        end = content.find("</think>") + len("</think>")
+        content = content[:start] + content[end:]
 
     print(f"Search results: {content}")
 
@@ -1395,6 +1437,8 @@ builder.add_node("code_normalization", code_normalization)  # process feedback f
 builder.add_node("collect_feedback_normalization", collect_feedback_normalization) # collect feedback for normalization
 builder.add_node("process_feedback_normalization", process_feedback_normalization) # process feedback for normalization
 
+builder.add_node("add_performance_metrics", add_performance_metrics)  # add performance metrics to code
+
 ########################## EGDES ##########################
 builder.add_edge(START, "route_question")
 
@@ -1406,7 +1450,6 @@ builder.add_conditional_edges(
     {
         "Academic Source": "generate_academic_query",
         "General Web Search": "generate_query",
-        #"Code": "generate",
         "Code": "search_relevant_sources",
     }
 )
@@ -1448,8 +1491,9 @@ builder.add_edge("collect_feedback_evaluation", "code_normalization")
 #builder.add_edge("evaluation", END)
 builder.add_edge("code_normalization", "collect_feedback_normalization")
 builder.add_edge("collect_feedback_normalization", "process_feedback_normalization")
-builder.add_edge("process_feedback_normalization", "check_code_sandbox")
-
+#builder.add_edge("process_feedback_normalization", "check_code_sandbox")
+builder.add_edge("process_feedback_normalization", "add_performance_metrics")
+builder.add_edge("add_performance_metrics", "check_code_sandbox")
 
 
 
