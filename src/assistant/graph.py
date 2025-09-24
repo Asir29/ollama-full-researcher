@@ -630,7 +630,7 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState) ->
     print("CONTEXT:", context)
 
     # Construct query
-    query = code_assistant_instructions + "\n Based on the following context, generate the code that satisfies the question:" + "Context: " + context + "\nQuestion: " + state.research_topic + "\n" + "If the question is a request related to the previusly generated code, consider also the previously generated code when producing the response. In the following the previously generated code: " + state.imports + state.code
+    query = code_assistant_instructions + "\n Based on the following context, generate the code that satisfies the question:" + "Context: " + context + "\nQuestion: " + state.research_topic + "\n" + "If the question is a request related to the previusly generated code, consider also the previously generated code when producing the response and return also the old code integrated with the modifications. In the following the previously generated code: " + state.imports + state.code
 
     # Run agent
     response = agent.run(query)
@@ -865,12 +865,16 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
     for pkg in packages:
         print(f"Installing {pkg} in sandbox...")
 
-        if pkg in ["torch"]:
+        if pkg in ["pytorch","torch"]:
             sandbox_execution.commands.run("pip install torch --index-url https://download.pytorch.org/whl/cpu", timeout=0) # cpu version of  torch, lighter (the sandbox is 1GB)
         elif pkg in ["tensorflow"]:
             sandbox_execution.commands.run("pip install --no-cache-dir tensorflow-cpu", timeout=0) # cpu version of tensorflow, lighter
         elif pkg in ["sklearn"]:
             sandbox_execution.commands.run("pip install scikit-learn", timeout=0) # sklearn is actually scikit-learn
+        elif pkg in ["opencv", "cv2"]:
+            sandbox_execution.commands.run("pip install opencv-python-headless", timeout=0)
+        elif pkg in ["PIL"]:
+            sandbox_execution.commands.run("pip install Pillow", timeout=0)
         else:
             result = sandbox_execution.commands.run(f"pip install {pkg}", timeout=0)
             print(result.stdout or result.stderr)
@@ -942,7 +946,8 @@ def reflection(state: SummaryState, config: RunnableConfig):
 
     code_reflection = "Few checks on the generated code" + code_reflection
 
-    
+    # Reset research topic for next iteration
+    state.research_topic = ""
 
     return {
         "code_reflection": code_reflection,
@@ -990,6 +995,8 @@ def decide_to_finish(state: SummaryState):
 
 def collect_feedback(state: SummaryState, config: RunnableConfig):
     print("---COLLECTING FEEDBACK FROM USER---")
+
+    
 
     feedback_prompt = {
         "instruction": "Please review the code and choose: approve, regenerate or evaluate with a reference code. Then explain your decision.",
@@ -1265,26 +1272,34 @@ def add_performance_metrics(state: SummaryState, config: RunnableConfig):
     )
 
     prompt = f"""
-    You are given one or more PyTorch (or snnTorch) model implementations. 
-    Extend the code to include a performance evaluation section for each model. 
-    After running a forward pass with the provided toy input, print the following metrics:
+        You are given one or more model implementations. 
+        Extend the code to include a performance evaluation section for each model. 
 
-    1. **Execution time** of the forward pass:
-    - Use the `time` module to measure wall-clock time.
-    - If running on GPU, ensure to call `torch.cuda.synchronize()` before and after timing to get accurate results.
+        Important rules:
+        - Use only ASCII characters in comments and code.
+        - Use the standard ASCII hyphen '-' if you need a dash.
+        - Do not use en-dashes (–), em-dashes (—), non-breaking hyphens (‑), or fancy quotes.
+        - Avoid decorative comment dividers like multiple repeated dashes; use simple comments instead.
 
-    2. **Model parameters**:
-    - Report the total number of parameters.
-    - Report the number of trainable parameters.
+        After running a forward pass with the provided toy input, print the following metrics for each model:
 
-    3. **Memory usage**:
-    - If running on **CPU**, use the `psutil` library to measure RSS memory before and after the forward pass.
-    - If running on **GPU**, use `torch.cuda.max_memory_allocated()` to report the maximum memory usage in MB.
+        1. Execution time of the forward pass:
+        - Use the time module to measure wall-clock time.
+        - If running on GPU, call torch.cuda.synchronize() before and after timing for accurate results.
 
-    Print all metrics in a clear and comparable format for each model (e.g., "Generated Model" vs "Reference Model"). 
-    Use only ASCII characters in comments and code.
-    Do not remove or change the original forward pass logic — only add metric collection and reporting.
-    """
+        2. Model parameters:
+        - Report the total number of parameters.
+        - Report the number of trainable parameters.
+
+        3. Memory usage:
+        - If running on CPU, use the psutil library to measure RSS memory before and after the forward pass.
+        - If running on GPU, use torch.cuda.max_memory_allocated() to report the maximum memory usage in MB.
+
+        Print all metrics clearly and comparably (e.g., "Generated Model" vs "Reference Model"). 
+        Do not remove or modify the original forward pass logic; only add metric collection and reporting.
+
+        """
+
     query= prompt + "\n" + state.fixed_code
     run_response = agent.run(query)
     print("RAW SEARCH RESPONSE:\n", run_response)
@@ -1428,7 +1443,7 @@ builder.add_node("generate", generate)  # generation solution
 builder.add_node("collect_feedback", collect_feedback)
 builder.add_node("process_feedback", process_feedback)
 builder.add_node("check_code_sandbox", check_code_sandbox)  # check code in sandbox
-builder.add_node("reflection", reflection)  # reflect on code
+builder.add_node("reflection", reflection)  # reflect on code errors
 #builder.add_node("evaluation", evaluation) # perform a systematic evaluation with groud truth code
 
 builder.add_node("collect_feedback_evaluation", collect_feedback_evaluation)  # collect feedback for evaluation
