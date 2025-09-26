@@ -79,3 +79,12 @@ print(run_result)
 print(run_result.__dict__)  # Or vars(result) — shows what's available
 
 
+   #sandbox_execution.commands.run("python -m pip install --upgrade pip", timeout=0)
+
+    # OPTIONAL PACKAGES TO SUPPORT THE SMALL MEMORY RESOURCES OF THE DEFAULT SANDBOX (currently 1GB)
+    # Install torch with no timeout 
+    #sandbox_execution.commands.run("pip install torch --index-url https://download.pytorch.org/whl/cpu", timeout=0)
+
+    # SandBox metrics are in a private beta for now
+    # metrics = sandbox.get_metrics() 
+    # print("Sandbox metrics:", metrics)

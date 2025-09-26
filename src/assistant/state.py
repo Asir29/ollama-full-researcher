@@ -50,6 +50,7 @@ class SummaryState:
     code_reflection: str = field(default=None)
 
     urls: str = field(default=None) 
+    status: str = field(default=None)
 
 
 

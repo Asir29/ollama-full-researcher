@@ -191,3 +191,41 @@ Rules:
 Perform the search now for the following query: "{research_topic}"
 """
 
+code_parser_instructions = """You are a code parser.
+
+    Take the generated code response and extract the following fields:
+    - prefix: a short description of the code solution
+    - imports: all required import statements as a single string
+    - code: the actual Python code (excluding imports)
+
+    ⚠️ Important:
+    - The imports must be returned as a single string (not a list).
+    - Do not return markdown formatting like ```json or explanations.
+    - Return ONLY a valid JSON object — no comments, no intro.
+
+    Example output format:
+    {
+    "prefix": "A classifier using snnTorch.",
+    "imports": "import torch\\nimport snntorch as snn",
+    "code": "class Net(nn.Module):\\n    def forward(self, x):\\n        return self.fc(x)"
+    }
+
+    Respond ONLY with a JSON object following this format.
+    Generated code:
+    """
+
+code_parser_instructions = """\
+    You are a code parser. Your task is to extract the prefix, imports, and code from the following text.
+    The text is a response from a code assistant. The response is structured in JSON format.
+    
+    The output should be a JSON object with the following fields:
+    {
+        "prefix": "A description of the code solution",
+        "imports": "The necessary import statements",
+        "code": "The functioning code block"
+    }
+
+    Instructions:
+    - Remove any surrounding Markdown fences or annotations.
+    - Only return the JSON content with prefix, imports, and code fields.
+    """

@@ -1,97 +1,114 @@
 # langgraph dev --no-reload
 # to run without reloading
 
-import torch
-torch.cuda.empty_cache()
+# -------------------------
+# 1️⃣ Core Python & Utilities
+# -------------------------
+import json                     # For parsing and storing JSON data
+import logging                  # Logging and debug output
+import re                       # Regular expressions for text processing
+import textwrap                 # Formatting text (wrapping)
+import asyncio                  # Async operations
+import numpy as np              # Numeric arrays and operations
+import torch                    # PyTorch (GPU/CPU tensors, deep learning)
+torch.cuda.empty_cache()        # Clear CUDA memory if needed
 
-
-import json
-import logging
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(method)s %(path)s %(status)s",  # Customize the format
-)
-
-
-
-logging.getLogger("langgraph_api.server").setLevel(logging.WARNING)
-
+# -------------------------
+# 2️⃣ Type Annotations & Data Models
+# -------------------------
+from typing import TypedDict
 from typing_extensions import Literal
+from typing import Annotated
+from pydantic import BaseModel, Field  # For structured data validation
 
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
-from langchain_core.runnables import RunnableConfig
-from langchain_ollama import ChatOllama
-from langgraph.graph import START, END, StateGraph
+# -------------------------
+# 3️⃣ LangGraph / LangChain Core
+# -------------------------
+from langgraph.graph import START, END, StateGraph          # State machine for workflows
+from langgraph.graph.message import AnyMessage, add_messages # Message handling
+from langgraph.types import Command, interrupt              # Command types and interruption
+from langgraph.checkpoint.memory import MemorySaver        # Persistent memory
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage  # LLM message types
+from langchain_core.runnables import RunnableConfig         # For running pipelines
+from langchain_core.prompts import ChatPromptTemplate       # Prompt templates
+from langchain.text_splitter import RecursiveCharacterTextSplitter  # Text splitting utilities
 
+# -------------------------
+# 4️⃣ LangChain Community Loaders / Vectorstores / Embeddings
+# -------------------------
+from langchain_community.document_loaders import WebBaseLoader, RecursiveUrlLoader  # Web scraping & site crawling
+from langchain_community.vectorstores import Chroma                                   # Vector DB
+from langchain.embeddings.base import Embeddings                                      # Base class for embeddings
+from langchain_nomic.embeddings import NomicEmbeddings                                 # Nomic embeddings model
+
+# -------------------------
+# 5️⃣ Agent / LLM Models
+# -------------------------
+from agno.agent import Agent                 # General agent abstraction
+from agno.models.ollama import Ollama       # Ollama LLM backend
+from langchain_ollama import ChatOllama     # LangChain wrapper for Ollama
+
+# -------------------------
+# 6️⃣ Tools for Search
+# -------------------------
+from agno.tools.googlesearch import GoogleSearchTools  # Google search
+from agno.tools.duckduckgo import DuckDuckGoTools      # DuckDuckGo search
+from agno.tools.baidusearch import BaiduSearchTools    # Baidu search
+from scholarly import scholarly                        # Google Scholar search
+from semanticscholar import SemanticScholar            # Semantic Scholar API
+
+# -------------------------
+# 7️⃣ HTML / Web Parsing
+# -------------------------
+from bs4 import BeautifulSoup  # HTML parsing and cleaning
+
+# -------------------------
+# 8️⃣ Code Evaluation / Sandbox
+# -------------------------
+from e2b_code_interpreter import Sandbox                                   # Secure code execution
+from openevals.code.e2b.pyright import create_e2b_pyright_evaluator        # Linting / type-checking
+from openevals.code.e2b.execution import create_e2b_execution_evaluator    # Code execution evaluator
+from openevals.code.pyright import create_pyright_evaluator                # Static type analysis
+
+# -------------------------
+# 9️⃣ Sentence Transformers / Embeddings
+# -------------------------
+from sentence_transformers import SentenceTransformer  # Embedding model for text or code
+from langchain.schema import Document                   # Standard document container for LangChain
+
+# -------------------------
+# 10️⃣ Custom Assistant Modules
+# -------------------------
 from src.assistant.configuration import Configuration
 from src.assistant.utils import deduplicate_and_format_sources, format_sources
 from src.assistant.state import SummaryState, SummaryStateInput, SummaryStateOutput
-from src.assistant.prompts import query_writer_instructions, summarizer_instructions, reflection_instructions, web_search_instructions, web_search_description, web_search_expected_output, router_instructions, code_assistant_instructions, academic_summarizer_instructions, code_reflection_instructions, code_search_instructions
+from src.assistant.prompts import (
+    query_writer_instructions, summarizer_instructions, reflection_instructions,
+    web_search_instructions, web_search_description, web_search_expected_output,
+    router_instructions, code_assistant_instructions, academic_summarizer_instructions,
+    code_reflection_instructions, code_search_instructions, code_parser_instructions
+)
+
+# -------------------------
+# 11️⃣ CopilotKit / LangGraph Utilities
+# -------------------------
 from copilotkit.langgraph import copilotkit_emit_message, copilotkit_exit, copilotkit_customize_config
 
-from agno.agent import Agent
-from agno.tools.googlesearch import GoogleSearchTools
-from agno.tools.duckduckgo import DuckDuckGoTools
-from agno.tools.baidusearch import BaiduSearchTools
 
-from agno.models.ollama import Ollama
-from langchain_ollama import ChatOllama
+# -----------------------------
+# Global logging configuration
+# -----------------------------
+logging.basicConfig(
+    level=logging.INFO,  # Show INFO, WARNING, ERROR, CRITICAL messages
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",  
+    # Using a safe, standard format that includes timestamp, logger name, level, and message
+)
 
-from scholarly import scholarly
+logging.getLogger("langgraph_api.server").setLevel(logging.WARNING)
+# Only show WARNING and ERROR from the langgraph_api.server logger to reduce clutter
 
-from typing import Annotated, TypedDict
-
-from langgraph.graph.message import AnyMessage, add_messages
-
-from langchain_core.prompts import ChatPromptTemplate
-
-#from utils import get_prompt_code_assistant
-
-import re
-import textwrap
-
-from langgraph.types import Command
-
-from pydantic import BaseModel, Field
-#from langchain_core.pydantic_v1 import BaseModel, Field
-from typing import TypedDict, Literal
-from langgraph.types import interrupt
-from langgraph.checkpoint.memory import MemorySaver
-
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import WebBaseLoader
-from langchain_community.vectorstores import Chroma
-from langchain_nomic.embeddings import NomicEmbeddings
-
-import asyncio
-from semanticscholar import SemanticScholar
-
-from e2b_code_interpreter import Sandbox
-from openevals.code.e2b.pyright import create_e2b_pyright_evaluator
-from openevals.code.e2b.execution import create_e2b_execution_evaluator
-
-
-from sentence_transformers import SentenceTransformer
-from langchain.schema import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import WebBaseLoader
-from langchain_community.vectorstores import Chroma
-from langchain.embeddings.base import Embeddings
-from pydantic import BaseModel, Field
-from agno.agent import Agent
-from agno.models.ollama import Ollama
-import numpy as np
-import json
-
-from openevals.code.pyright import create_pyright_evaluator
-
-
-
-
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)  
+# Use this logger in your module: logger.info(...), logger.warning(...), etc.
 
 
 # Nodes
@@ -520,7 +537,9 @@ async def summarize_academic_sources(state: SummaryState, config: RunnableConfig
 
 
 
-# Data model for the Code
+# -------------------------
+# Custom Code Output Model
+# -------------------------
 class CodeOutput(BaseModel):
     """Code output"""
     prefix: str = Field(description="Description of the problem and approach")
@@ -528,32 +547,12 @@ class CodeOutput(BaseModel):
     code: str = Field(description="Code block not including import statements")
     
 
-code_parser_instructions = """\
-    You are a code parser. Your task is to extract the prefix, imports, and code from the following text.
-    The text is a response from a code assistant. The response is structured in JSON format.
-    
-    The output should be a JSON object with the following fields:
-    {
-        "prefix": "A description of the code solution",
-        "imports": "The necessary import statements",
-        "code": "The functioning code block"
-    }
-    """
 
 
+# -------------------------
+# Custom Embedding Wrapper
+# -------------------------
 
-
-
-# # Proper embedding wrapper for LangChain
-# class SentenceTransformerEmbeddings(Embeddings):
-#     def __init__(self, model_name: str):
-#         self.model = SentenceTransformer(model_name, trust_remote_code=True, device="cuda") # change here if want to use "cuda" or "cpu"
-
-#     def embed_documents(self, texts):
-#         return self.model.encode(texts).tolist()
-
-#     def embed_query(self, text):
-#         return self.model.encode([text])[0].tolist()
 class SentenceTransformerEmbeddings(Embeddings):
     def __init__(self, model_name: str):
         import os
@@ -583,125 +582,189 @@ class SentenceTransformerEmbeddings(Embeddings):
     def embed_query(self, text):
         return self.model.encode([text])[0].tolist()
 
+# -------------------------
+# Helper Functions
+# -------------------------
+def load_and_split(docs, chunk_size=512, overlap=50):
+    """Split crawled documents into chunks."""
+    splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+        chunk_size=chunk_size,
+        chunk_overlap=overlap
+    )
+    return splitter.split_documents(docs)
+
+def build_vectorstore(docs, embedding_model, collection="default", persist=None):
+    """Build a Chroma vectorstore from documents + embeddings."""
+    return Chroma.from_documents(
+        documents=docs,
+        embedding=embedding_model,
+        collection_name=collection,
+        persist_directory=persist
+    )
+
+
+def search_relevant_sources(state: SummaryState, config: RunnableConfig):
+    """
+    Crawls the SNN documentation site and creates a persisted vectorstore.
+    """
+
+    print("---CREATING SNN VECTORSTORE---")
+
+    # 1️⃣ Crawl SNN docs
+    loader = RecursiveUrlLoader(
+        url="https://snntorch.readthedocs.io/en/latest/",
+        max_depth=4,
+        extractor=lambda x: BeautifulSoup(x, "html.parser").get_text()
+    )
+    snn_docs = loader.load()
+    print(f"Loaded {len(snn_docs)} SNN docs pages")
+
+    # 2️⃣ Split documents
+    doc_splits = load_and_split(snn_docs, chunk_size=512, overlap=50)
+
+    # 3️⃣ Create & persist vectorstore
+    embedding_model = SentenceTransformerEmbeddings("mchochlov/codebert-base-cd-ft")
+    vectorstore = build_vectorstore(
+        doc_splits,
+        embedding_model,
+        collection="snntorch-docs",
+        persist="./chroma_snn_docs"
+    )
+    vectorstore.persist()
+    print("SNN vectorstore persisted at './chroma_snn_docs'")
+
+    return {"status": "vectorstore_created"}
+
+
 
 
 def generate_code(question: str, config: RunnableConfig, state: SummaryState) -> CodeOutput:
-    agent = Agent(
+
+
+    print("--- GENERATING CODE ---")
+
+    # -------------------------
+    # 1️⃣ Web Search for User URLs
+    # -------------------------
+    # Use search tools
+    duck_tool = DuckDuckGoTools(fixed_max_results=3)
+    google_tool = GoogleSearchTools(proxy=None)  # or proxy="http://your_proxy:port"
+    baidusearch_tool = BaiduSearchTools(fixed_max_results=3)
+
+    search_agent = Agent(
+        model=Ollama(id="qwen3:latest"),
+        tools=[duck_tool],
+        show_tool_calls=True,
+        markdown=False
+    )
+
+    # Format search query
+    search_query = code_search_instructions.format(research_topic=state.research_topic)
+    search_response = search_agent.run(search_query)
+    print("RAW SEARCH RESPONSE:\n", search_response)
+
+    # Clean up <think> tags from Deepseek/LLM responses
+    content = search_response.content
+    while "<think>" in content and "</think>" in content:
+        start = content.find("<think>")
+        end = content.find("</think>") + len("</think>")
+        content = content[:start] + content[end:]
+
+    # Parse URLs returned by the search
+    try:
+        data = json.loads(content or "{}")
+        urls = data.get("urls", [])
+    except json.JSONDecodeError:
+        urls = []
+    print(f"User URLs: {urls}")
+
+    # Load content from user-specified URLs
+    url_docs = []
+    for url in urls:
+        url_docs.extend(WebBaseLoader(url).load())
+    url_context = "\n\n".join([doc.page_content for doc in url_docs])
+
+    # -------------------------
+    # 2️⃣ Load SNN Documentation Vectorstore
+    # -------------------------
+    embedding_model = SentenceTransformerEmbeddings("mchochlov/codebert-base-cd-ft")
+    #embedding_model = SentenceTransformerEmbeddings("nomic-ai/CodeRankEmbed")
+
+    # Load persisted vectorstore
+    vectorstore = Chroma(
+        embedding_function=embedding_model,
+        collection_name="snntorch-docs",
+        persist_directory="./chroma_snn_docs"
+    )
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+
+    # Retrieve relevant SNN docs
+    snn_relevant = retriever.get_relevant_documents(state.research_topic)
+    snn_context = "\n\n".join([doc.page_content for doc in snn_relevant])
+
+    # -------------------------
+    # 3️⃣ Combine contexts
+    # -------------------------
+    combined_context = snn_context + "\n\n" + url_context
+
+    # -------------------------
+    # 4️⃣ Construct prompt for code generation
+    # -------------------------
+    code_agent = Agent(
         model=Ollama(id="gpt-oss:20b"),
         tools=[],
         show_tool_calls=False,
         use_json_mode=True,
     )
 
-    # Load URLs
-    data = json.loads(state.urls or "{}" )
-    print(data)
-
-    urls = data["urls"]
-    print(f"URLs: {urls}")
-
-    # Load documents
-    docs = [WebBaseLoader(url).load() for url in urls]
-    docs_list = [doc for sublist in docs for doc in sublist]
-    print(f"Loaded {len(docs_list)} documents")
-
-    # Split documents
-    text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
-        chunk_size=128, chunk_overlap=0
-    )
-    doc_splits = text_splitter.split_documents(docs_list)
-
-    # Use lightweight embedding model
-    embedding_model = SentenceTransformerEmbeddings("nomic-ai/CodeRankEmbed")
-
-
-    # Vectorstore
-    vectorstore = Chroma.from_documents(
-        documents=doc_splits,
-        embedding=embedding_model,
-        collection_name="code-rag",
-        persist_directory=None  # 👈 In-memory only, no persistence. Remove the line to make the embedding persistent.
+    prompt = (
+    code_assistant_instructions
+    + "\nBased on the following context, generate the code that satisfies the question:\n"
+    + "Context:\n" + combined_context
+    + "\nQuestion:\n" + state.research_topic
+    + "\nIf the question asks for a modification to previously generated code, "
+      "return the ENTIRE codebase again, with the requested modification fully integrated. "
+      "Do NOT output only the new fragment—always output the complete updated code.\n"
+    + "Here is the previously generated code:\n"
+    + state.imports + state.code
     )
 
-    # Retrieve
-    retriever = vectorstore.as_retriever()
-    relevant_docs = retriever.get_relevant_documents(state.research_topic)
-    context = "\n\n".join([doc.page_content for doc in relevant_docs])
-    print("CONTEXT:", context)
 
-    # Construct query
-    query = code_assistant_instructions + "\n Based on the following context, generate the code that satisfies the question:" + "Context: " + context + "\nQuestion: " + state.research_topic + "\n" + "If the question is a request related to the previusly generated code, consider also the previously generated code when producing the response and return also the old code integrated with the modifications. In the following the previously generated code: " + state.imports + state.code
+    # Run the code generation agent
+    code_response = code_agent.run(prompt)
+    print("RAW CODE RESPONSE:\n", repr(code_response.content))
 
-    # Run agent
-    response = agent.run(query)
-    response_text = response.content
-    print("RAW RESPONSE TEXT:\n", repr(response_text))
-
-    # Parse result
-    # try:
-    #     parsed_response = json.loads(response_text)
-    # except json.JSONDecodeError as e:
-    #     print(f"Error during JSON parsing: {e}")
-    #     return CodeOutput(prefix="", imports="", code="")
-
-    # imports_str = parsed_response.get("imports", "")
-    # if isinstance(imports_str, list):
-    #     imports_str = "\n".join(imports_str)
-
-    # Parse result with LLM
-    agent_parser = Agent(
+    # -------------------------
+    # 5️⃣ Parse LLM response to structured code
+    # -------------------------
+    parser_agent = Agent(
         model=Ollama(id="gpt-oss:20b"),
         tools=[],
         show_tool_calls=False,
         use_json_mode=True,
-    )  
+    )
 
-    code_parser_instructions = """You are a code parser.
+    parser_prompt = code_parser_instructions + " " + code_response.content
+    parser_response = parser_agent.run(parser_prompt)
+    print("RAW PARSER RESPONSE:\n", repr(parser_response.content))
 
-    Take the generated code response and extract the following fields:
-    - prefix: a short description of the code solution
-    - imports: all required import statements as a single string
-    - code: the actual Python code (excluding imports)
+    # Convert parser output to dictionary
+    parsed_response = json.loads(parser_response.content)
 
-    ⚠️ Important:
-    - The imports must be returned as a single string (not a list).
-    - Do not return markdown formatting like ```json or explanations.
-    - Return ONLY a valid JSON object — no comments, no intro.
-
-    Example output format:
-    {
-    "prefix": "A classifier using snnTorch.",
-    "imports": "import torch\\nimport snntorch as snn",
-    "code": "class Net(nn.Module):\\n    def forward(self, x):\\n        return self.fc(x)"
-    }
-
-    Respond ONLY with a JSON object following this format.
-    Generated code:
-    """
-
-    parser_query = code_parser_instructions + " " + response_text
-    
-    response = agent_parser.run(parser_query)
-    print("RAW PARSER RESPONSE TEXT:\n", repr(response.content))
-    response_text = response.content
-    parsed_response = json.loads(response_text)
-
-    print("PARSED RESPONSE TEXT:\n", parsed_response)
-
+    # Format imports
     imports_str = parsed_response.get("imports", "")
     if isinstance(imports_str, list):
         imports_str = "\n".join(imports_str)
 
-    # return CodeOutput(
-    #     prefix=parsed_response.get("prefix", ""),
-    #     imports=imports_str,
-    #     code=parsed_response.get("code", "")
-    # )
+    # -------------------------
+    # 6️⃣ Return CodeOutput
+    # -------------------------
     return CodeOutput(
         prefix=parsed_response.get("prefix", ""),
         imports=f"```python\n{imports_str}\n```",
         code=f"```python\n{parsed_response.get('code', '')}\n```"
     )
+
 
 
 
@@ -833,24 +896,10 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
     sandbox_execution = Sandbox.create() # with this use sbx.run_code
 
     # Static type check
-    # evaluator_pyright = create_e2b_pyright_evaluator(sandbox=sandbox_execution)#sandbox_pyright)
-    # eval_result_pyright = evaluator_pyright(outputs=combined_code)
-    # print("Pyright result:", eval_result_pyright)
+    
     static_evaluation_result = static_evaluator(outputs=combined_code)
-
-
     
-    
-
-    #sandbox_execution.commands.run("python -m pip install --upgrade pip", timeout=0)
-
-    # OPTIONAL PACKAGES TO SUPPORT THE SMALL MEMORY RESOURCES OF THE DEFAULT SANDBOX (currently 1GB)
-    # Install torch with no timeout 
-    #sandbox_execution.commands.run("pip install torch --index-url https://download.pytorch.org/whl/cpu", timeout=0)
-
-    # SandBox metrics are in a private beta for now
-    # metrics = sandbox.get_metrics() 
-    # print("Sandbox metrics:", metrics)
+ 
 
     
     # Extract dependencies via LLM
@@ -996,22 +1045,34 @@ def decide_to_finish(state: SummaryState):
 def collect_feedback(state: SummaryState, config: RunnableConfig):
     print("---COLLECTING FEEDBACK FROM USER---")
 
+    #sandbox_pyright = Sandbox.create("OpenEvalsPython") # already with pyright and uv installed
+    static_evaluator = create_pyright_evaluator()
+
+    imports=state.code_generation.imports.replace("```python\n", "").replace("\n```", "")
+    code=state.code_generation.code.replace("```python\n", "").replace("\n```", "")
+    combined_code = f"{imports}\n{code}"
+    #print("Combined code for static evaluation:\n", combined_code)
     
 
+    static_evaluation_result = static_evaluator(outputs=combined_code)
+
+    state.fixed_code = combined_code # store the fixed code in state in case of execution trough sandbox
+
     feedback_prompt = {
-        "instruction": "Please review the code and choose: approve, regenerate or evaluate with a reference code. Then explain your decision.",
+        "instruction": "Please review the code and choose: *approve*, *regenerate*, *evaluate with a reference code* or to *execute the code*. Then explain your decision.",
         "prefix": state.code_generation.prefix,
         "imports": state.code_generation.imports,
         "code": state.code_generation.code,
+        "static_python_check": static_evaluation_result or "No pyright result",
     }
 
     # This pauses execution and will show editable fields
     user_input = interrupt(feedback_prompt)
 
     # Return the user edits into state
-    return {
-        "user_feedback": user_input
-    }
+    # return {
+    #     "user_feedback": user_input
+    # }
 
 
 
@@ -1043,11 +1104,13 @@ def process_feedback(state: SummaryState, config: RunnableConfig):
     {{"response": "approve"}}
     {{"response": "regenerate"}}
     {{"response": "evaluation"}}
+    {{"response": "execute"}}
 
     ### Definitions:
     - Use **"evaluation"** if the user wants to perform an evaluation or if the user talks about to evaluate.
     - Use **"approve"** if the user is fully satisfied and wants to keep the code exactly as it is, with **no changes requested**.
     - Use **"regenerate"** if the user asks for **any modifications**, **improvements**, or expresses **dissatisfaction** with the current code.
+    - Use **"execute"** if the user wants to run the code in a sandbox to check for errors.
     Only return the JSON object — do not include any other text, explanations, or logs.
     """
 
@@ -1072,7 +1135,7 @@ def process_feedback(state: SummaryState, config: RunnableConfig):
         parsed = json.loads(response_text)
         action = parsed.get("response", "regenerate").lower()
 
-        if action not in {"regenerate", "approve", "evaluation"}:
+        if action not in {"regenerate", "approve", "evaluation", "execute"}:
             action = "regenerate"
 
     except Exception as e:
@@ -1088,7 +1151,7 @@ def collect_feedback_evaluation(state: SummaryState, config: RunnableConfig):
     print("---COLLECTING FEEDBACK FOR EVALUATION FROM USER---")
 
     feedback_prompt = {
-        "instruction": "Please insert the code to compare the generated code with.",
+        "instruction": "Please insert the *REFERENCE CODE* to compare the generated code with.",
         "code_review": {
             "prefix": state.code_generation.prefix,
             "imports": state.code_generation.imports,
@@ -1133,23 +1196,28 @@ Task:
 
 - Produce ONE self-contained Python script as output.
 - The script must contain two clear sections:
-    ### Normalized generated
-    <Python code adapted from the generated snippet>
 
-    ### Normalized reference
-    <Python code adapted from the reference snippet>
-- Both sections MUST:
-    * Define and use the SAME constant TOY_INPUT.
-    * If one code cannot directly accept TOY_INPUT, ADAPT it (e.g., reshaping, type conversion) so both work with exactly the same TOY_INPUT.
+    ### Generated code
+    - Include the generated snippet **exactly as provided**.
+    - Do not modify the internal logic, classes, or functions.
+    - Only wrap it so it can run on the same TOY_INPUT as the reference code.
+
+    ### Reference code
+    - Include the reference snippet.
+    - If needed, adapt its input handling so it can run on the same TOY_INPUT.
+
+- Both sections MUST use the **same TOY_INPUT**.
 - At the end of the script:
-    * Instantiate any classes or functions needed.
-    * Run both normalized sections on TOY_INPUT.
-    * Print both outputs clearly, in the format:
+    - Instantiate any classes or functions needed.
+    - Run both sections on TOY_INPUT.
+    - Print both outputs clearly, like:
       Generated output: <value>
       Reference output: <value>
-- Do NOT include JSON, markdown fences, or extra explanation.
-- Ensure the output is pure, executable Python code with the requested sections.
+
+- Do NOT include JSON, markdown fences, or explanations.
+- Ensure the output is pure, executable Python code.
 """
+
 
     script_str = ""
 
@@ -1271,142 +1339,42 @@ def add_performance_metrics(state: SummaryState, config: RunnableConfig):
         structured_outputs=True,
     )
 
-    prompt = f"""
-        You are given one or more model implementations. 
-        Extend the code to include a performance evaluation section for each model. 
+    prompt = """
+        Task: Modify the given PyTorch code to measure and report the following performance metrics for a single forward pass of each model:
 
-        Important rules:
-        - Use only ASCII characters in comments and code.
-        - Use the standard ASCII hyphen '-' if you need a dash.
-        - Do not use en-dashes (–), em-dashes (—), non-breaking hyphens (‑), or fancy quotes.
-        - Avoid decorative comment dividers like multiple repeated dashes; use simple comments instead.
+        1. Execution time of the forward pass in seconds.
+        2. Total number of trainable parameters in the model.
+        3. Memory usage (approximate GPU memory if on CUDA, otherwise CPU memory) during the forward pass.
 
-        After running a forward pass with the provided toy input, print the following metrics for each model:
+        The code should work for both standard nn.Module and custom spiking neuron models. Add metrics printing after running the forward pass. Keep the existing functionality intact.
 
-        1. Execution time of the forward pass:
-        - Use the time module to measure wall-clock time.
-        - If running on GPU, call torch.cuda.synchronize() before and after timing for accurate results.
+        Requirements:
+        - Use torch.cuda.memory_allocated() and torch.cuda.reset_peak_memory_stats() for GPU memory tracking if CUDA is available; otherwise, use CPU memory via tracemalloc or similar.
+        - Measure time using time.time() before and after the forward pass.
+        - Count parameters using sum(p.numel() for p in model.parameters()).
+        - Print a summary like:
+        Model: MyNet
+        Forward pass time: 0.0123 s
+        Total parameters: 1_234
+        Peak memory usage: 12.3 MB
+        - Ensure the metrics are accurate for one forward pass, not training steps or multiple passes.
 
-        2. Model parameters:
-        - Report the total number of parameters.
-        - Report the number of trainable parameters.
-
-        3. Memory usage:
-        - If running on CPU, use the psutil library to measure RSS memory before and after the forward pass.
-        - If running on GPU, use torch.cuda.max_memory_allocated() to report the maximum memory usage in MB.
-
-        Print all metrics clearly and comparably (e.g., "Generated Model" vs "Reference Model"). 
-        Do not remove or modify the original forward pass logic; only add metric collection and reporting.
-
+        Modify only what is needed to collect these metrics; do not change model architectures or forward computations.
         """
+
+
+
+
 
     query= prompt + "\n" + state.fixed_code
     run_response = agent.run(query)
-    print("RAW SEARCH RESPONSE:\n", run_response)
+    #print("RAW SEARCH RESPONSE:\n", run_response)
     content = run_response.content
-
+    print(f"Code with metrics added:\n{content}")
     state.fixed_code = content
     return {"fixed_code": content}
 
 
-def search_relevant_sources(state: SummaryState, config: RunnableConfig):
-    """
-    Search for relevant sources to code based on the user's request
-    """
-    print("---SEARCHING RELEVANT SOURCES TO CODE---")
-
-    # Optional: use a working proxy if needed
-    google_tool = GoogleSearchTools(proxy=None)  # or proxy="http://your_proxy:port"
-    duck_tool = DuckDuckGoTools(fixed_max_results=3)
-    baidusearch_tool = BaiduSearchTools(fixed_max_results=3)
-
-
-    # Search the web
-    agent = Agent(
-        model=Ollama(id="qwen3:latest"),
-        tools=[duck_tool],#GoogleSearchTools
-        show_tool_calls=True,
-        markdown=False
-        
-    )
-
-
-    query = code_search_instructions.format(research_topic=state.research_topic)# + "\n Search for the following query: " + state.research_topic + "\n"
-    run_response = agent.run(query)  
-    print("RAW SEARCH RESPONSE:\n", run_response)
-    content = run_response.content
-
-    # TODO: This is a hack to remove the <think> tags w/ Deepseek models 
-    # It appears very challenging to prompt them out of the responses 
-    while "<think>" in content and "</think>" in content:
-        start = content.find("<think>")
-        end = content.find("</think>") + len("</think>")
-        content = content[:start] + content[end:]
-
-    print(f"Search results: {content}")
-
-    return {"urls": content}
-
-
-
-# def evaluation(state: SummaryState, config: RunnableConfig):
-#     """
-#     Perform a systematic evaluation with ground truth code in an E2B sandbox.
-#     """
-#     print("---PERFORMING EVALUATION---")
-
-#     code_output = state.code_generation
-#     imports = code_output.imports
-#     code = code_output.code
-
-#     # Extract packages from import lines
-#     import_lines = imports.split("\n")
-#     packages = set()
-#     for line in import_lines:
-#         line = line.strip()
-#         if line.startswith("import "):
-#             parts = line.split()
-#             if len(parts) >= 2:
-#                 packages.add(parts[1].split(".")[0])
-#         elif line.startswith("from "):
-#             parts = line.split()
-#             if len(parts) >= 2:
-#                 packages.add(parts[1].split(".")[0])
-
-#     # Convert to pip install command
-#     pip_cmd = "pip install " + " ".join(sorted(packages)) if packages else ""
-
-#     # Combine everything
-#     executable_code = f"""
-#     import subprocess
-#     import sys
-
-#     # Install necessary packages
-#     subprocess.run([sys.executable, "-m", "pip", "install", {" ".join(repr(pkg) for pkg in packages)}])
-
-#     # --- Imports ---
-#     {imports}
-
-#     # --- Code ---
-#     {code}
-#         """.strip()
-
-#     # Now run the code in E2B sandbox
-
-
-#     sandbox = Sandbox("OpenEvalsPython")
-
-#     # Optional: run pip install directly (if using SDK-level install)
-#     # await sandbox.run(pip_cmd)
-
-#     evaluator = create_e2b_execution_evaluator(sandbox=sandbox)
-
-#     result = evaluator(outputs=executable_code)
-
-#     print("EVALUATION RESULT:")
-#     print(result)
-
-#     return {"evaluation_result": result}
 
 
 
@@ -1499,6 +1467,7 @@ builder.add_conditional_edges(
         "regenerate": "generate",
         "approve": END,
         "evaluation": "collect_feedback_evaluation",
+        "execute": "check_code_sandbox",
     },
 )
 
