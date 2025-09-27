@@ -613,7 +613,7 @@ def search_relevant_sources(state: SummaryState, config: RunnableConfig):
     # 1️⃣ Crawl SNN docs
     loader = RecursiveUrlLoader(
         url="https://snntorch.readthedocs.io/en/latest/",
-        max_depth=4,
+        max_depth=3,
         extractor=lambda x: BeautifulSoup(x, "html.parser").get_text()
     )
     snn_docs = loader.load()
