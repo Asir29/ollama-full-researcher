@@ -537,15 +537,7 @@ async def summarize_academic_sources(state: SummaryState, config: RunnableConfig
 
 
 
-# -------------------------
-# Custom Code Output Model
-# -------------------------
-class CodeOutput(BaseModel):
-    """Code output"""
-    prefix: str = Field(description="Description of the problem and approach")
-    imports: str = Field(description="Code block import statements")
-    code: str = Field(description="Code block not including import statements")
-    
+
 
 
 
@@ -602,6 +594,58 @@ def build_vectorstore(docs, embedding_model, collection="default", persist=None)
         persist_directory=persist
     )
 
+def extract_packages_from_imports(import_block: str):
+    """
+    Use LLM to extract pip-installable packages from import block as a comma-separated string.
+    Ignores imports inside Python code fences.
+    """
+    print("Extracting packages from imports...", import_block)
+
+    # Remove any Python code blocks (```python ... ```)
+    pattern = r"```python.*?```"
+    cleaned_import_block = re.sub(pattern, "", import_block, flags=re.DOTALL).strip()
+
+    prompt_template = """
+        You are given a block of Python import statements.
+
+        Your task is to return ONLY the pip-installable package names as a single comma-separated string.
+
+        ### Instructions:
+        - Output ONLY the top-level package names, separated by commas (e.g., torch,snntorch,matplotlib).
+        - Do NOT include explanations, markdown, quotes, or code fences.
+        - Exclude standard library modules (e.g., sys, os, typing).
+        - Only include packages that are explicitly imported (e.g., for `import numpy as np`, return `numpy`).
+        - In `from x import y` statements, include only `x`.
+        - Preserve the order in which packages appear.
+        - Ignore relative imports and local files.
+
+        ### Imports:
+        {import_block}
+        """
+    prompt = prompt_template.format(import_block=cleaned_import_block)
+
+    agent = Agent(
+        model=Ollama(id="mistral:latest"),
+        tools=[],
+        show_tool_calls=False,
+        use_json_mode=False,
+    )
+
+    try:
+        response = agent.run(prompt)
+        print("RAW RESPONSE TEXT PACKAGES EXTRACTOR:\n", response)
+
+        response_text = response.content if hasattr(response, "content") else str(response)
+
+        # Parse into clean list
+        package_list = [pkg.strip() for pkg in response_text.split(",") if pkg.strip()]
+        return package_list
+
+    except Exception as e:
+        print("Fallback to empty package list due to error:", e)
+        return []
+
+
 
 def search_relevant_sources(state: SummaryState, config: RunnableConfig):
     """
@@ -638,7 +682,7 @@ def search_relevant_sources(state: SummaryState, config: RunnableConfig):
 
 
 
-def generate_code(question: str, config: RunnableConfig, state: SummaryState) -> CodeOutput:
+def generate_code(question: str, config: RunnableConfig, state: SummaryState):
 
 
     print("--- GENERATING CODE ---")
@@ -653,7 +697,7 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState) ->
 
     search_agent = Agent(
         model=Ollama(id="qwen3:latest"),
-        tools=[duck_tool],
+        tools=[google_tool],
         show_tool_calls=True,
         markdown=False
     )
@@ -726,44 +770,28 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState) ->
       "return the ENTIRE codebase again, with the requested modification fully integrated. "
       "Do NOT output only the new fragment—always output the complete updated code.\n"
     + "Here is the previously generated code:\n"
-    + state.imports + state.code
+    + state.code
     )
 
 
     # Run the code generation agent
     code_response = code_agent.run(prompt)
     print("RAW CODE RESPONSE:\n", repr(code_response.content))
+    content = code_response.content
+    code = ""
 
-    # -------------------------
-    # 5️⃣ Parse LLM response to structured code
-    # -------------------------
-    parser_agent = Agent(
-        model=Ollama(id="gpt-oss:20b"),
-        tools=[],
-        show_tool_calls=False,
-        use_json_mode=True,
-    )
+    try:
+        content = json.loads(content or "{}")
+        code = content.get("code", "")
+    except json.JSONDecodeError:
+        code = "Error: Unable to parse code response."
+        
+    print("PARSED CODE:\n", code)
+    #state.code = code
+    #state.fixed_code = code # save for later sandboxing
 
-    parser_prompt = code_parser_instructions + " " + code_response.content
-    parser_response = parser_agent.run(parser_prompt)
-    print("RAW PARSER RESPONSE:\n", repr(parser_response.content))
-
-    # Convert parser output to dictionary
-    parsed_response = json.loads(parser_response.content)
-
-    # Format imports
-    imports_str = parsed_response.get("imports", "")
-    if isinstance(imports_str, list):
-        imports_str = "\n".join(imports_str)
-
-    # -------------------------
-    # 6️⃣ Return CodeOutput
-    # -------------------------
-    return CodeOutput(
-        prefix=parsed_response.get("prefix", ""),
-        imports=f"```python\n{imports_str}\n```",
-        code=f"```python\n{parsed_response.get('code', '')}\n```"
-    )
+    return code
+    
 
 
 
@@ -788,85 +816,32 @@ def generate(state: SummaryState, config: RunnableConfig):
     iterations = state.code_iterations
 
     # Solution
-    code_solution = generate_code(messages, config, state)
+    code = generate_code(messages, config, state)
+
+    state.code = code
+    state.fixed_code = code # save for later sandboxing
+
+    print("CODE SOLUTION:\n", code)
+    
 
     
 
-    messages += [
-        (
-            "assistant",
-            f"Here is my attempt to solve the problem:\n\n"
-            f"Prefix:\n{code_solution.prefix}\n\n"
-            f"Imports:\n{code_solution.imports}\n\n"
-            f"Code:\n{code_solution.code}\n```"
+    # messages += [
+    #     (
+    #         "assistant",
+    #         f"Here is my attempt to solve the problem:\n\n"
+    #         f"Code:\n{code}\n```"
            
-        )
-    ]
-
-    print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-    print(type(code_solution.code))
-    
-    #state.code_generation = code_solution.code
-    #state.messages = messages
+    #     )
+    # ]
 
 
     # Increment
     #state.code_iterations = state.code_iterations + 1
-    return {"code_generation": code_solution} #, "user_feedback": state.user_feedback
+    return {"code": code, "fixed_code": code} #, "user_feedback": state.user_feedback
 
 
 
-
-def extract_packages_from_imports(import_block: str):
-    """
-    Use LLM to extract pip-installable packages from import block as a comma-separated string.
-    Ignores imports inside Python code fences.
-    """
-    print("Extracting packages from imports...", import_block)
-
-    # Remove any Python code blocks (```python ... ```)
-    pattern = r"```python.*?```"
-    cleaned_import_block = re.sub(pattern, "", import_block, flags=re.DOTALL).strip()
-
-    prompt_template = """
-        You are given a block of Python import statements.
-
-        Your task is to return ONLY the pip-installable package names as a single comma-separated string.
-
-        ### Instructions:
-        - Output ONLY the top-level package names, separated by commas (e.g., torch,snntorch,matplotlib).
-        - Do NOT include explanations, markdown, quotes, or code fences.
-        - Exclude standard library modules (e.g., sys, os, typing).
-        - Only include packages that are explicitly imported (e.g., for `import numpy as np`, return `numpy`).
-        - In `from x import y` statements, include only `x`.
-        - Preserve the order in which packages appear.
-        - Ignore relative imports and local files.
-
-        ### Imports:
-        {import_block}
-        """
-    prompt = prompt_template.format(import_block=cleaned_import_block)
-
-    agent = Agent(
-        model=Ollama(id="mistral:latest"),
-        tools=[],
-        show_tool_calls=False,
-        use_json_mode=False,
-    )
-
-    try:
-        response = agent.run(prompt)
-        print("RAW RESPONSE TEXT PACKAGES EXTRACTOR:\n", response)
-
-        response_text = response.content if hasattr(response, "content") else str(response)
-
-        # Parse into clean list
-        package_list = [pkg.strip() for pkg in response_text.split(",") if pkg.strip()]
-        return package_list
-
-    except Exception as e:
-        print("Fallback to empty package list due to error:", e)
-        return []
 
 
 
@@ -879,14 +854,37 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
     """
     Check code in a sandbox with dependency installation.
     """
+    print("---CHECKING CODE IN SANDBOX---")
+    #agent that extracts ONLY the imports
 
+    agent = Agent(
+        model=Ollama(id="mistral:latest"),
+        tools=[],
+        show_tool_calls=False,
+        use_json_mode=False,
+    )
+    
+    imports_extractor_instructions = """
+    You are given a block of Python code.
+    Your task is to return ONLY the import statements as a single block of text.
+    ### Instructions:
+    - Output ONLY the import statements, preserving their order, Separated by new lines.
+    """
+    print("fixed_code:\n", state.fixed_code)
 
-    imports = state.code_generation.imports or ""
+    query = imports_extractor_instructions + "\n Code:\n" + state.fixed_code + "\n"
+
+    response = agent.run(query)
+
+    
+    imports = response.content
+    
     print("Imports to give to extract_packages:", imports)
     #code = state.code_generation.code or ""
     
     combined_code = state.fixed_code.replace("```python\n", "").replace("\n```", "") # remove markdown formatting if any
     #combined_code = f"{imports}\n{code}"
+    
 
 
     #sandbox_pyright = Sandbox.create("OpenEvalsPython") # already with pyright and uv installed
@@ -928,7 +926,7 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
             result = sandbox_execution.commands.run(f"pip install {pkg}", timeout=0)
             print(result.stdout or result.stderr)
 
-   
+    print("code to execute in sandbox:\n", combined_code)
 
     # Execution check
     evaluator_exec = create_e2b_execution_evaluator(sandbox=sandbox_execution)
@@ -1048,21 +1046,27 @@ def collect_feedback(state: SummaryState, config: RunnableConfig):
     #sandbox_pyright = Sandbox.create("OpenEvalsPython") # already with pyright and uv installed
     static_evaluator = create_pyright_evaluator()
 
-    imports=state.code_generation.imports.replace("```python\n", "").replace("\n```", "")
-    code=state.code_generation.code.replace("```python\n", "").replace("\n```", "")
-    combined_code = f"{imports}\n{code}"
+    code = state.code
+
+    print("code before replace:", code)
+
+    # ensure 'code' is a dict
+    if isinstance(code, dict):
+        code = code.get("code", "")
+
+    code = code.replace("```python\n", "").replace("\n```", "")
     #print("Combined code for static evaluation:\n", combined_code)
     
 
-    static_evaluation_result = static_evaluator(outputs=combined_code)
+    static_evaluation_result = static_evaluator(outputs=code)
 
-    state.fixed_code = combined_code # store the fixed code in state in case of execution trough sandbox
+    print("code before state.fixed_code = code", code)
+    state.fixed_code = code # store the fixed code in state in case of execution trough sandbox
+    print("code after state.fixed_code = code", state.fixed_code)
 
     feedback_prompt = {
         "instruction": "Please review the code and choose: *approve*, *regenerate*, *evaluate with a reference code* or to *execute the code*. Then explain your decision.",
-        "prefix": state.code_generation.prefix,
-        "imports": state.code_generation.imports,
-        "code": state.code_generation.code,
+        "code": state.code,
         "static_python_check": static_evaluation_result or "No pyright result",
     }
 
@@ -1153,9 +1157,7 @@ def collect_feedback_evaluation(state: SummaryState, config: RunnableConfig):
     feedback_prompt = {
         "instruction": "Please insert the *REFERENCE CODE* to compare the generated code with.",
         "code_review": {
-            "prefix": state.code_generation.prefix,
-            "imports": state.code_generation.imports,
-            "code": state.code_generation.code,
+            "code": state.code,
         }
     }
 
@@ -1167,7 +1169,6 @@ def collect_feedback_evaluation(state: SummaryState, config: RunnableConfig):
 
 def code_normalization(state: SummaryState, config: RunnableConfig):
     """Process the user feedback, produce the codes to compare with the same inputs"""
-    import json
 
     print("---NORMALIZING GENERATED CODE AND REFERENCE CODE---")
     print("\nstate in process feedback:", state)
@@ -1185,7 +1186,7 @@ You are a code normalization assistant.
 You are given two Python code snippets:
 
 <<GENERATED>>
-{state.code_generation.code}
+{state.code}
 <<END_GENERATED>>
 
 <<REFERENCE>>

@@ -31,9 +31,8 @@ class SummaryState:
     code_iterations: int = field(default=0)
     max_code_iterations: int = field(default=3)
     
-    code_generation: str = field(default="Empty") # CodeOutput 
     imports: str = field(default="Empty") # used by generator to access previous imports
-    code: str = field(default="Empty") # only the code, used by the generator to access previous code
+    code: str = field(default="") # only the code, used by the generator to access previous code
     normalized_code: str = field(default="Empty") # code after being processed by the normalizer
     fixed_code: str = field(default="Empty") # code after being fixed by user
 

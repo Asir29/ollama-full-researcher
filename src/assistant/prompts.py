@@ -156,10 +156,8 @@ You MUST convert the incoming text into a single JSON, that contains a list of "
 
 code_assistant_instructions = """ \
     You are a coding assistant. Ensure any code you provide can be executed with all required imports and variables 
-    defined. Structure your answer in JSON format with the following fields:
+    defined. Structure your answer in JSON format with the following field:
     {
-        "prefix": "A description of the code solution",
-        "imports": "The necessary import statements",
         "code": "The functioning code block"
     }
     You MUST avoid to include any explanation or meta-commentary.
@@ -191,28 +189,28 @@ Rules:
 Perform the search now for the following query: "{research_topic}"
 """
 
-code_parser_instructions = """You are a code parser.
+# code_parser_instructions = """You are a code parser.
 
-    Take the generated code response and extract the following fields:
-    - prefix: a short description of the code solution
-    - imports: all required import statements as a single string
-    - code: the actual Python code (excluding imports)
+#     Take the generated code response and extract the following fields:
+#     - prefix: a short description of the code solution
+#     - imports: all required import statements as a single string
+#     - code: the actual Python code (excluding imports)
 
-    ⚠️ Important:
-    - The imports must be returned as a single string (not a list).
-    - Do not return markdown formatting like ```json or explanations.
-    - Return ONLY a valid JSON object — no comments, no intro.
+#     Important:
+#     - The imports must be returned as a single string (not a list).
+#     - Do not return markdown formatting like ```json or explanations.
+#     - Return ONLY a valid JSON object — no comments, no intro.
 
-    Example output format:
-    {
-    "prefix": "A classifier using snnTorch.",
-    "imports": "import torch\\nimport snntorch as snn",
-    "code": "class Net(nn.Module):\\n    def forward(self, x):\\n        return self.fc(x)"
-    }
+#     Example output format:
+#     {
+#     "prefix": "A classifier using snnTorch.",
+#     "imports": "import torch\\nimport snntorch as snn",
+#     "code": "class Net(nn.Module):\\n    def forward(self, x):\\n        return self.fc(x)"
+#     }
 
-    Respond ONLY with a JSON object following this format.
-    Generated code:
-    """
+#     Respond ONLY with a JSON object following this format.
+#     Generated code:
+#     """
 
 code_parser_instructions = """\
     You are a code parser. Your task is to extract the prefix, imports, and code from the following text.
