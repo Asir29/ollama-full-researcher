@@ -596,17 +596,18 @@ def build_vectorstore(docs, embedding_model, collection="default", persist=None)
 
 def extract_packages_from_imports(import_block: str):
     """
-    Use LLM to extract pip-installable packages from import block as a comma-separated string.
+    Use LLM to extract pip-installable packages from code block as a comma-separated string.
     Ignores imports inside Python code fences.
     """
     print("Extracting packages from imports...", import_block)
 
-    # Remove any Python code blocks (```python ... ```)
-    pattern = r"```python.*?```"
+    # Remove any fenced code block
+    pattern = r"```.*?```"
     cleaned_import_block = re.sub(pattern, "", import_block, flags=re.DOTALL).strip()
 
+
     prompt_template = """
-        You are given a block of Python import statements.
+        You are given a block of Python code.
 
         Your task is to return ONLY the pip-installable package names as a single comma-separated string.
 
@@ -619,7 +620,7 @@ def extract_packages_from_imports(import_block: str):
         - Preserve the order in which packages appear.
         - Ignore relative imports and local files.
 
-        ### Imports:
+        ### Code:
         {import_block}
         """
     prompt = prompt_template.format(import_block=cleaned_import_block)
@@ -819,7 +820,7 @@ def generate(state: SummaryState, config: RunnableConfig):
     code = generate_code(messages, config, state)
 
     state.code = code
-    state.fixed_code = code # save for later sandboxing
+    #state.fixed_code = code # save for later sandboxing
 
     print("CODE SOLUTION:\n", code)
     
@@ -838,7 +839,7 @@ def generate(state: SummaryState, config: RunnableConfig):
 
     # Increment
     #state.code_iterations = state.code_iterations + 1
-    return {"code": code, "fixed_code": code} #, "user_feedback": state.user_feedback
+    return {"code": code} #, "user_feedback": state.user_feedback
 
 
 
@@ -857,6 +858,14 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
     print("---CHECKING CODE IN SANDBOX---")
     #agent that extracts ONLY the imports
 
+    code = ""
+
+    print("Current state.user_feedback_processed: ", state.user_feedback_processed)
+    if state.user_feedback_processed == "evaluate":
+        code = state.fixed_code # from normalization step
+    elif state.user_feedback_processed == "execute":
+        code = state.code # from code generation step
+
     agent = Agent(
         model=Ollama(id="mistral:latest"),
         tools=[],
@@ -870,9 +879,9 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
     ### Instructions:
     - Output ONLY the import statements, preserving their order, Separated by new lines.
     """
-    print("fixed_code:\n", state.fixed_code)
+    print("fixed_code:\n", code)
 
-    query = imports_extractor_instructions + "\n Code:\n" + state.fixed_code + "\n"
+    query = imports_extractor_instructions + "\n Code:\n" + code + "\n"
 
     response = agent.run(query)
 
@@ -882,7 +891,7 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
     print("Imports to give to extract_packages:", imports)
     #code = state.code_generation.code or ""
     
-    combined_code = state.fixed_code.replace("```python\n", "").replace("\n```", "") # remove markdown formatting if any
+    cleaned_code = code.replace("```python\n", "").replace("\n```", "") # remove markdown formatting if any
     #combined_code = f"{imports}\n{code}"
     
 
@@ -895,7 +904,7 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
 
     # Static type check
     
-    static_evaluation_result = static_evaluator(outputs=combined_code)
+    static_evaluation_result = static_evaluator(outputs=cleaned_code)
     
  
 
@@ -926,15 +935,15 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
             result = sandbox_execution.commands.run(f"pip install {pkg}", timeout=0)
             print(result.stdout or result.stderr)
 
-    print("code to execute in sandbox:\n", combined_code)
+    print("code to execute in sandbox:\n", cleaned_code)
 
     # Execution check
     evaluator_exec = create_e2b_execution_evaluator(sandbox=sandbox_execution)
-    eval_result_execution = evaluator_exec(outputs=combined_code)
+    eval_result_execution = evaluator_exec(outputs=cleaned_code)
     print("Execution result:", eval_result_execution)
 
     # Direct execution in sandbox (outside evaluator)
-    run_result = sandbox_execution.run_code(combined_code)
+    run_result = sandbox_execution.run_code(cleaned_code)
 
     print("=== STDOUT ===")
     print(run_result)
@@ -1002,6 +1011,7 @@ def reflection(state: SummaryState, config: RunnableConfig):
     }
 
 
+### NOT USED
 def decide_to_finish(state: SummaryState):
     """
     Determines whether to finish.
@@ -1060,9 +1070,8 @@ def collect_feedback(state: SummaryState, config: RunnableConfig):
 
     static_evaluation_result = static_evaluator(outputs=code)
 
-    print("code before state.fixed_code = code", code)
-    state.fixed_code = code # store the fixed code in state in case of execution trough sandbox
-    print("code after state.fixed_code = code", state.fixed_code)
+    #state.fixed_code = code # store the fixed code in state in case of execution trough sandbox
+    
 
     feedback_prompt = {
         "instruction": "Please review the code and choose: *approve*, *regenerate*, *evaluate with a reference code* or to *execute the code*. Then explain your decision.",
