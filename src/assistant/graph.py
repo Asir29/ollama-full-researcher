@@ -1364,7 +1364,7 @@ def add_performance_metrics(state: SummaryState, config: RunnableConfig):
     )
 
     prompt = """
-        Task: Modify the given PyTorch code to measure and report the following performance metrics for a single forward pass of each model:
+        Task: Modify the given code to measure and report the following performance metrics for a single forward pass of each model:
 
         1. Execution time of the forward pass in seconds.
         2. Total number of trainable parameters in the model.
@@ -1374,18 +1374,25 @@ def add_performance_metrics(state: SummaryState, config: RunnableConfig):
         - Do not change model architectures or forward computations.
         - Do not include explanations, markdown, comments outside the code, or special characters like ### or <br>.
         - Output ONLY the complete Python script.
+        - Ensure the code works for models implemented in PyTorch, snnTorch, or similar frameworks.
+        - Handle models that have no trainable parameters gracefully.
+        - Handle models that do not implement .parameters().
+        - Default to torch.device('cpu') if device information is not available.
+        - Use safe device detection logic to avoid errors.
+        - If applicable, register internal state variables with the framework’s recommended method (e.g., register_buffer for PyTorch).
 
         Requirements inside the script:
         - Use time.time() for timing.
         - Use torch.cuda.reset_peak_memory_stats() / torch.cuda.max_memory_allocated() for CUDA memory.
         - Use tracemalloc for CPU memory tracking if CUDA is not available.
-        - Count parameters with sum(p.numel() for p in model.parameters()) if nn.Module exists, else 0.
+        - Count parameters with sum(p.numel() for p in model.parameters()) if available, otherwise return 0.
         - After the forward pass, print:
         Model: MyNet
         Forward pass time: 0.0123 s
         Total parameters: 1_234
         Peak memory usage: 12.3 MB
         """
+
 
 
 
