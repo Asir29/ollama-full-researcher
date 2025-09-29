@@ -12,6 +12,7 @@ import asyncio                  # Async operations
 import numpy as np              # Numeric arrays and operations
 import torch                    # PyTorch (GPU/CPU tensors, deep learning)
 torch.cuda.empty_cache()        # Clear CUDA memory if needed
+import os
 
 # -------------------------
 # Type Annotations & Data Models
@@ -596,93 +597,46 @@ def build_vectorstore(docs, embedding_model, collection="default", persist=None)
 
 def extract_packages_from_imports(import_block: str):
     """
-    Use LLM to extract pip-installable packages from code block as a comma-separated string.
-    Ignores imports inside Python code fences.
+    Use LLM to extract pip-installable packages from import statements.
+    Cleans out fenced code blocks and enforces JSON output.
     """
     print("Extracting packages from imports...", import_block)
 
-    # Remove any fenced code block
-    pattern = r"```.*?```"
-    cleaned_import_block = re.sub(pattern, "", import_block, flags=re.DOTALL).strip()
+    # 1️⃣ Remove fenced code blocks (```python ... ``` or ``` ... ```)
+    cleaned = re.sub(r"```(?:python)?\s*([\s\S]*?)```", r"\1", import_block).strip()
 
+    prompt = f"""
+    You are a Python dependency extractor.
 
-    prompt_template = """
-        You are a Python code analyzer.
+    Task: From the following Python import statements, return ONLY a JSON array of top-level pip-installable package names.
 
-        Your task: Extract ONLY the top-level pip-installable package names from the given Python code. 
-        Return them as a single comma-separated string, and nothing else. Do NOT include explanations, markdown, quotes, code fences, or anything extra.
+    Rules:
+    - Do NOT include standard library modules (json, re, logging, os, sys, typing, etc.).
+    - Keep only installable packages (e.g., numpy, torch, scikit-learn).
+    - Use correct PyPI names (e.g., sklearn → scikit-learn, cv2 → opencv-python-headless, PIL → Pillow).
+    - Output must be valid JSON: ["pkg1", "pkg2", ...] — nothing else.
 
-        ### Strict Rules:
-        1. Include ONLY top-level packages that are imported in the code.
-        - Example: `import numpy as np` → numpy
-        - Example: `from torch.nn import Linear` → torch
-        2. Exclude:
-        - Python standard library modules (sys, os, typing, json, re, etc.)
-        - Relative imports (e.g., `from .utils import helper`)
-        - Local files or scripts
-        3. Preserve the order in which packages appear.
-        4. Ignore any import statements inside code fences (```).
-        5. Output ONLY the comma-separated package names.
-
-        ### Few-shot Examples:
-
-        #### Example 1:
-        Python Code:
-
-        import torch
-        import os
-        import numpy as np
-        from torch.nn import Linear
-
-        Output:
-        torch,numpy
-
-        #### Example 2:
-        Python Code:
-
-        from sklearn.model_selection import train_test_split
-        import pandas as pd
-        import sys
-
-        Output:
-        sklearn,pandas
-
-        #### Example 3:
-        Python Code:
-
-        import requests
-        import json
-        from .my_module import helper
-
-        Output:
-        requests
-
-        ### Python Code to Analyze:
-        {import_block}
-        """
-
-
-
-
-
-    prompt = prompt_template.format(import_block=cleaned_import_block)
+    Python imports to analyze:
+    {cleaned}
+    """
 
     agent = Agent(
         model=Ollama(id="mistral:latest"),
         tools=[],
         show_tool_calls=False,
-        use_json_mode=False,
+        use_json_mode=True,   # 🔑 enforce structured JSON
     )
 
     try:
         response = agent.run(prompt)
-        print("RAW RESPONSE TEXT PACKAGES EXTRACTOR:\n", response)
-
         response_text = response.content if hasattr(response, "content") else str(response)
+        print("RAW RESPONSE:", response_text)
 
-        # Parse into clean list
-        package_list = [pkg.strip() for pkg in response_text.split(",") if pkg.strip()]
-        return package_list
+        packages = json.loads(response_text)
+        if not isinstance(packages, list):
+            raise ValueError("LLM did not return a JSON list")
+
+        return [pkg.strip() for pkg in packages if isinstance(pkg, str) and pkg.strip()]
 
     except Exception as e:
         print("Fallback to empty package list due to error:", e)
@@ -690,10 +644,20 @@ def extract_packages_from_imports(import_block: str):
 
 
 
+
+
+
 def search_relevant_sources(state: SummaryState, config: RunnableConfig):
     """
     Crawls the SNN documentation site and creates a persisted vectorstore.
+    Skips building if the vectorstore already exists.
     """
+    persist_dir = "./chroma_snn_docs"
+
+    # ✅ Skip build if already exists
+    if os.path.exists(persist_dir) and os.listdir(persist_dir):
+        print(f"Vectorstore already exists at {persist_dir}, skipping build.")
+        return {"status": "vectorstore_already_exists"}
 
     print("---CREATING SNN VECTORSTORE---")
 
@@ -711,16 +675,17 @@ def search_relevant_sources(state: SummaryState, config: RunnableConfig):
 
     # 3️⃣ Create & persist vectorstore
     embedding_model = SentenceTransformerEmbeddings("mchochlov/codebert-base-cd-ft")
-    vectorstore = build_vectorstore(
-        doc_splits,
-        embedding_model,
-        collection="snntorch-docs",
-        persist="./chroma_snn_docs"
+    vectorstore = Chroma.from_documents(
+        documents=doc_splits,
+        embedding=embedding_model,
+        collection_name="snntorch-docs",
+        persist_directory=persist_dir
     )
     vectorstore.persist()
-    print("SNN vectorstore persisted at './chroma_snn_docs'")
+    print(f"SNN vectorstore persisted at '{persist_dir}'")
 
     return {"status": "vectorstore_created"}
+
 
 
 
@@ -1405,21 +1370,23 @@ def add_performance_metrics(state: SummaryState, config: RunnableConfig):
         2. Total number of trainable parameters in the model.
         3. Memory usage (approximate GPU memory if on CUDA, otherwise CPU memory) during the forward pass.
 
-        The code should work for both standard nn.Module and custom spiking neuron models. Add metrics printing after running the forward pass. Keep the existing functionality intact.
+        Rules:
+        - Do not change model architectures or forward computations.
+        - Do not include explanations, markdown, comments outside the code, or special characters like ### or <br>.
+        - Output ONLY the complete Python script.
 
-        Requirements:
-        - Use torch.cuda.memory_allocated() and torch.cuda.reset_peak_memory_stats() for GPU memory tracking if CUDA is available; otherwise, use CPU memory via tracemalloc or similar.
-        - Measure time using time.time() before and after the forward pass.
-        - Count parameters using sum(p.numel() for p in model.parameters()).
-        - Print a summary like:
+        Requirements inside the script:
+        - Use time.time() for timing.
+        - Use torch.cuda.reset_peak_memory_stats() / torch.cuda.max_memory_allocated() for CUDA memory.
+        - Use tracemalloc for CPU memory tracking if CUDA is not available.
+        - Count parameters with sum(p.numel() for p in model.parameters()) if nn.Module exists, else 0.
+        - After the forward pass, print:
         Model: MyNet
         Forward pass time: 0.0123 s
         Total parameters: 1_234
         Peak memory usage: 12.3 MB
-        - Ensure the metrics are accurate for one forward pass, not training steps or multiple passes.
-
-        Modify only what is needed to collect these metrics; do not change model architectures or forward computations.
         """
+
 
 
 
