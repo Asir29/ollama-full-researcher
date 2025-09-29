@@ -2,7 +2,7 @@
 # to run without reloading
 
 # -------------------------
-# 1️⃣ Core Python & Utilities
+# Core Python & Utilities
 # -------------------------
 import json                     # For parsing and storing JSON data
 import logging                  # Logging and debug output
@@ -14,7 +14,7 @@ import torch                    # PyTorch (GPU/CPU tensors, deep learning)
 torch.cuda.empty_cache()        # Clear CUDA memory if needed
 
 # -------------------------
-# 2️⃣ Type Annotations & Data Models
+# Type Annotations & Data Models
 # -------------------------
 from typing import TypedDict
 from typing_extensions import Literal
@@ -22,7 +22,7 @@ from typing import Annotated
 from pydantic import BaseModel, Field  # For structured data validation
 
 # -------------------------
-# 3️⃣ LangGraph / LangChain Core
+# LangGraph / LangChain Core
 # -------------------------
 from langgraph.graph import START, END, StateGraph          # State machine for workflows
 from langgraph.graph.message import AnyMessage, add_messages # Message handling
@@ -34,7 +34,7 @@ from langchain_core.prompts import ChatPromptTemplate       # Prompt templates
 from langchain.text_splitter import RecursiveCharacterTextSplitter  # Text splitting utilities
 
 # -------------------------
-# 4️⃣ LangChain Community Loaders / Vectorstores / Embeddings
+# LangChain Community Loaders / Vectorstores / Embeddings
 # -------------------------
 from langchain_community.document_loaders import WebBaseLoader, RecursiveUrlLoader  # Web scraping & site crawling
 from langchain_community.vectorstores import Chroma                                   # Vector DB
@@ -42,14 +42,14 @@ from langchain.embeddings.base import Embeddings                                
 from langchain_nomic.embeddings import NomicEmbeddings                                 # Nomic embeddings model
 
 # -------------------------
-# 5️⃣ Agent / LLM Models
+# Agent / LLM Models
 # -------------------------
 from agno.agent import Agent                 # General agent abstraction
 from agno.models.ollama import Ollama       # Ollama LLM backend
 from langchain_ollama import ChatOllama     # LangChain wrapper for Ollama
 
 # -------------------------
-# 6️⃣ Tools for Search
+# Tools for Search
 # -------------------------
 from agno.tools.googlesearch import GoogleSearchTools  # Google search
 from agno.tools.duckduckgo import DuckDuckGoTools      # DuckDuckGo search
@@ -58,12 +58,12 @@ from scholarly import scholarly                        # Google Scholar search
 from semanticscholar import SemanticScholar            # Semantic Scholar API
 
 # -------------------------
-# 7️⃣ HTML / Web Parsing
+# HTML / Web Parsing
 # -------------------------
 from bs4 import BeautifulSoup  # HTML parsing and cleaning
 
 # -------------------------
-# 8️⃣ Code Evaluation / Sandbox
+# Code Evaluation / Sandbox
 # -------------------------
 from e2b_code_interpreter import Sandbox                                   # Secure code execution
 from openevals.code.e2b.pyright import create_e2b_pyright_evaluator        # Linting / type-checking
@@ -71,13 +71,13 @@ from openevals.code.e2b.execution import create_e2b_execution_evaluator    # Cod
 from openevals.code.pyright import create_pyright_evaluator                # Static type analysis
 
 # -------------------------
-# 9️⃣ Sentence Transformers / Embeddings
+# Sentence Transformers / Embeddings
 # -------------------------
 from sentence_transformers import SentenceTransformer  # Embedding model for text or code
 from langchain.schema import Document                   # Standard document container for LangChain
 
 # -------------------------
-# 10️⃣ Custom Assistant Modules
+# Custom Assistant Modules
 # -------------------------
 from src.assistant.configuration import Configuration
 from src.assistant.utils import deduplicate_and_format_sources, format_sources
@@ -86,11 +86,11 @@ from src.assistant.prompts import (
     query_writer_instructions, summarizer_instructions, reflection_instructions,
     web_search_instructions, web_search_description, web_search_expected_output,
     router_instructions, code_assistant_instructions, academic_summarizer_instructions,
-    code_reflection_instructions, code_search_instructions, code_parser_instructions
+    code_reflection_instructions, code_search_instructions
 )
 
 # -------------------------
-# 11️⃣ CopilotKit / LangGraph Utilities
+# CopilotKit / LangGraph Utilities
 # -------------------------
 from copilotkit.langgraph import copilotkit_emit_message, copilotkit_exit, copilotkit_customize_config
 
@@ -607,22 +607,64 @@ def extract_packages_from_imports(import_block: str):
 
 
     prompt_template = """
-        You are given a block of Python code.
+        You are a Python code analyzer.
 
-        Your task is to return ONLY the pip-installable package names as a single comma-separated string.
+        Your task: Extract ONLY the top-level pip-installable package names from the given Python code. 
+        Return them as a single comma-separated string, and nothing else. Do NOT include explanations, markdown, quotes, code fences, or anything extra.
 
-        ### Instructions:
-        - Output ONLY the top-level package names, separated by commas (e.g., torch,snntorch,matplotlib).
-        - Do NOT include explanations, markdown, quotes, or code fences.
-        - Exclude standard library modules (e.g., sys, os, typing).
-        - Only include packages that are explicitly imported (e.g., for `import numpy as np`, return `numpy`).
-        - In `from x import y` statements, include only `x`.
-        - Preserve the order in which packages appear.
-        - Ignore relative imports and local files.
+        ### Strict Rules:
+        1. Include ONLY top-level packages that are imported in the code.
+        - Example: `import numpy as np` → numpy
+        - Example: `from torch.nn import Linear` → torch
+        2. Exclude:
+        - Python standard library modules (sys, os, typing, json, re, etc.)
+        - Relative imports (e.g., `from .utils import helper`)
+        - Local files or scripts
+        3. Preserve the order in which packages appear.
+        4. Ignore any import statements inside code fences (```).
+        5. Output ONLY the comma-separated package names.
 
-        ### Code:
+        ### Few-shot Examples:
+
+        #### Example 1:
+        Python Code:
+
+        import torch
+        import os
+        import numpy as np
+        from torch.nn import Linear
+
+        Output:
+        torch,numpy
+
+        #### Example 2:
+        Python Code:
+
+        from sklearn.model_selection import train_test_split
+        import pandas as pd
+        import sys
+
+        Output:
+        sklearn,pandas
+
+        #### Example 3:
+        Python Code:
+
+        import requests
+        import json
+        from .my_module import helper
+
+        Output:
+        requests
+
+        ### Python Code to Analyze:
         {import_block}
         """
+
+
+
+
+
     prompt = prompt_template.format(import_block=cleaned_import_block)
 
     agent = Agent(
@@ -860,9 +902,11 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
 
     code = ""
 
+    print("state in check_code_sandbox: ", state)
+
     print("Current state.user_feedback_processed: ", state.user_feedback_processed)
-    if state.user_feedback_processed == "evaluate":
-        code = state.fixed_code # from normalization step
+    if state.user_feedback_processed == "evaluation":
+        code = state.normalized_code # from normalization step
     elif state.user_feedback_processed == "execute":
         code = state.code # from code generation step
 
@@ -878,9 +922,15 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
     Your task is to return ONLY the import statements as a single block of text.
     ### Instructions:
     - Output ONLY the import statements, preserving their order, Separated by new lines.
-    """
-    print("fixed_code:\n", code)
+    - Do NOT include explanations, markdown, quotes, or code fences.
+    - Exclude any comments or non-import lines.
 
+    - example:
+        import torch
+        import snntorch as snn
+        
+    """
+    print("Code to extract imports from:\n", code)
     query = imports_extractor_instructions + "\n Code:\n" + code + "\n"
 
     response = agent.run(query)
@@ -1070,7 +1120,6 @@ def collect_feedback(state: SummaryState, config: RunnableConfig):
 
     static_evaluation_result = static_evaluator(outputs=code)
 
-    #state.fixed_code = code # store the fixed code in state in case of execution trough sandbox
     
 
     feedback_prompt = {
@@ -1180,7 +1229,6 @@ def code_normalization(state: SummaryState, config: RunnableConfig):
     """Process the user feedback, produce the codes to compare with the same inputs"""
 
     print("---NORMALIZING GENERATED CODE AND REFERENCE CODE---")
-    print("\nstate in process feedback:", state)
 
     agent = Agent(
         model=Ollama(id="gpt-oss:20b"),#deepseek-r1
@@ -1328,12 +1376,13 @@ def process_feedback_normalization(state: SummaryState, config: RunnableConfig):
 
     except Exception as e:
         print(f"An error occurred: {e}")
-        return {"fixed_code": ""}
+        return {"normalized_code": ""}
 
     #state.fixed_code = fixed_code
     #state.fixed_code = f"```python\n{fixed_code}\n```"
+    state.normalized_code = fixed_code
 
-    return {"fixed_code": fixed_code}
+    return {"normalized_code": fixed_code}
 
 
 def add_performance_metrics(state: SummaryState, config: RunnableConfig):
@@ -1376,13 +1425,13 @@ def add_performance_metrics(state: SummaryState, config: RunnableConfig):
 
 
 
-    query= prompt + "\n" + state.fixed_code
+    query= prompt + "\n" + state.normalized_code
     run_response = agent.run(query)
     #print("RAW SEARCH RESPONSE:\n", run_response)
     content = run_response.content
     print(f"Code with metrics added:\n{content}")
-    state.fixed_code = content
-    return {"fixed_code": content}
+    state.normalized_code = content
+    return {"normalized_code": content}
 
 
 
