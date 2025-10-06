@@ -91,6 +91,94 @@ from src.assistant.prompts import (
 )
 
 # -------------------------
+# Helper Functions
+# -------------------------
+def load_and_split(docs, chunk_size=512, overlap=50):
+    """Split crawled documents into chunks."""
+    splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+        chunk_size=chunk_size,
+        chunk_overlap=overlap
+    )
+    return splitter.split_documents(docs)
+
+def build_vectorstore(docs, embedding_model, collection="default", persist=None):
+    """Build a Chroma vectorstore from documents + embeddings."""
+    return Chroma.from_documents(
+        documents=docs,
+        embedding=embedding_model,
+        collection_name=collection,
+        persist_directory=persist
+    )
+
+def extract_packages_from_imports(import_block: str):
+    """
+    Use LLM to extract pip-installable packages from import statements.
+    Cleans out fenced code blocks and enforces JSON output.
+    """
+    print("Extracting packages from imports...\n", import_block)
+
+    # 1️⃣ Remove fenced code blocks (```python ... ``` or ``` ... ```)
+    cleaned = re.sub(r"```(?:python)?\s*([\s\S]*?)```", r"\1", import_block).strip()
+
+    prompt = f"""
+    You are a Python dependency extractor.
+
+    Task: From the following Python import statements, return ONLY a JSON array of top-level pip-installable package names.
+
+    Rules:
+    - Do NOT include standard library modules (json, re, logging, os, sys, typing, etc.).
+    - Keep only installable packages (e.g., numpy, torch, scikit-learn).
+    - Use correct PyPI names (e.g., sklearn → scikit-learn, cv2 → opencv-python-headless, PIL → Pillow).
+    - Output must be valid JSON: ["pkg1", "pkg2", ...] — nothing else.
+
+    Python imports to analyze:
+    {cleaned}
+    """
+
+    agent = Agent(
+        model=Ollama(id="mistral:latest"),
+        tools=[],
+        show_tool_calls=False,
+        use_json_mode=True,   # 🔑 enforce structured JSON
+    )
+
+    try:
+        response = agent.run(prompt)
+        response_text = response.content if hasattr(response, "content") else str(response)
+        #print("RAW RESPONSE:", response_text)
+
+        packages = json.loads(response_text)
+        if not isinstance(packages, list):
+            raise ValueError("LLM did not return a JSON list")
+
+        return [pkg.strip() for pkg in packages if isinstance(pkg, str) and pkg.strip()]
+
+    except Exception as e:
+        print("Fallback to empty package list due to error:", e)
+        return []
+
+def remove_think_tags(text: str) -> str:
+    """
+    Removes all occurrences of <think>...</think> tags from a string.
+
+    Args:
+        text (str): The input string potentially containing <think> tags.
+
+    Returns:
+        str: The cleaned string without any <think>...</think> segments.
+    """
+    cleaned_text = text
+    while "<think>" in cleaned_text and "</think>" in cleaned_text:
+        start = cleaned_text.find("<think>")
+        end = cleaned_text.find("</think>") + len("</think>")
+        cleaned_text = cleaned_text[:start] + cleaned_text[end:]
+    return cleaned_text
+
+
+
+
+
+# -------------------------
 # CopilotKit / LangGraph Utilities
 # -------------------------
 from copilotkit.langgraph import copilotkit_emit_message, copilotkit_exit, copilotkit_customize_config
@@ -167,7 +255,7 @@ async def generate_query(state: SummaryState, config: RunnableConfig):
     """ Generate a query for web search """
     
     # Format the prompt
-    print(f"Current state: {state}")
+    #print(f"Current state: {state}")
     query_writer_instructions_formatted = query_writer_instructions.format(research_topic=state.research_topic)
 
     # Generate a query
@@ -258,12 +346,8 @@ async def summarize_sources(state: SummaryState, config: RunnableConfig):
 
     running_summary = result.content
 
-    # TODO: This is a hack to remove the <think> tags w/ Deepseek models 
-    # It appears very challenging to prompt them out of the responses 
-    while "<think>" in running_summary and "</think>" in running_summary:
-        start = running_summary.find("<think>")
-        end = running_summary.find("</think>") + len("</think>")
-        running_summary = running_summary[:start] + running_summary[end:]
+    
+    running_summary = remove_think_tags(running_summary)
 
     await copilotkit_emit_message(config, json.dumps({
         "node": "Summarize Sources",
@@ -344,12 +428,9 @@ async def summarize_sources(state: SummaryState, config: RunnableConfig):
 
     running_summary = result.content
 
-    # TODO: This is a hack to remove the <think> tags w/ Deepseek models 
-    # It appears very challenging to prompt them out of the responses 
-    while "<think>" in running_summary and "</think>" in running_summary:
-        start = running_summary.find("<think>")
-        end = running_summary.find("</think>") + len("</think>")
-        running_summary = running_summary[:start] + running_summary[end:]
+
+
+    running_summary = remove_think_tags(running_summary)
 
     await copilotkit_emit_message(config, json.dumps({
         "node": "Summarize Sources",
@@ -432,7 +513,7 @@ async def generate_academic_query(state: SummaryState, config: RunnableConfig):
     """ Generate a query for academic search """
     
     # Format the prompt
-    print(f"Current state: {state}")
+    #print(f"Current state: {state}")
     query_writer_instructions_formatted = query_writer_instructions.format(research_topic=state.research_topic)
 
     # Generate a query
@@ -519,12 +600,8 @@ async def summarize_academic_sources(state: SummaryState, config: RunnableConfig
 
     running_summary = result.content
 
-    # TODO: This is a hack to remove the <think> tags w/ Deepseek models 
-    # It appears very challenging to prompt them out of the responses 
-    while "<think>" in running_summary and "</think>" in running_summary:
-        start = running_summary.find("<think>")
-        end = running_summary.find("</think>") + len("</think>")
-        running_summary = running_summary[:start] + running_summary[end:]
+
+    running_summary = remove_think_tags(running_summary)
 
     await copilotkit_emit_message(config, json.dumps({
         "node": "Summarize Sources",
@@ -534,13 +611,6 @@ async def summarize_academic_sources(state: SummaryState, config: RunnableConfig
 
 
 ########################################### CODE GENERATION BRANCH #############################################
-
-
-
-
-
-
-
 
 # -------------------------
 # Custom Embedding Wrapper
@@ -574,73 +644,6 @@ class SentenceTransformerEmbeddings(Embeddings):
 
     def embed_query(self, text):
         return self.model.encode([text])[0].tolist()
-
-# -------------------------
-# Helper Functions
-# -------------------------
-def load_and_split(docs, chunk_size=512, overlap=50):
-    """Split crawled documents into chunks."""
-    splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
-        chunk_size=chunk_size,
-        chunk_overlap=overlap
-    )
-    return splitter.split_documents(docs)
-
-def build_vectorstore(docs, embedding_model, collection="default", persist=None):
-    """Build a Chroma vectorstore from documents + embeddings."""
-    return Chroma.from_documents(
-        documents=docs,
-        embedding=embedding_model,
-        collection_name=collection,
-        persist_directory=persist
-    )
-
-def extract_packages_from_imports(import_block: str):
-    """
-    Use LLM to extract pip-installable packages from import statements.
-    Cleans out fenced code blocks and enforces JSON output.
-    """
-    print("Extracting packages from imports...", import_block)
-
-    # 1️⃣ Remove fenced code blocks (```python ... ``` or ``` ... ```)
-    cleaned = re.sub(r"```(?:python)?\s*([\s\S]*?)```", r"\1", import_block).strip()
-
-    prompt = f"""
-    You are a Python dependency extractor.
-
-    Task: From the following Python import statements, return ONLY a JSON array of top-level pip-installable package names.
-
-    Rules:
-    - Do NOT include standard library modules (json, re, logging, os, sys, typing, etc.).
-    - Keep only installable packages (e.g., numpy, torch, scikit-learn).
-    - Use correct PyPI names (e.g., sklearn → scikit-learn, cv2 → opencv-python-headless, PIL → Pillow).
-    - Output must be valid JSON: ["pkg1", "pkg2", ...] — nothing else.
-
-    Python imports to analyze:
-    {cleaned}
-    """
-
-    agent = Agent(
-        model=Ollama(id="mistral:latest"),
-        tools=[],
-        show_tool_calls=False,
-        use_json_mode=True,   # 🔑 enforce structured JSON
-    )
-
-    try:
-        response = agent.run(prompt)
-        response_text = response.content if hasattr(response, "content") else str(response)
-        print("RAW RESPONSE:", response_text)
-
-        packages = json.loads(response_text)
-        if not isinstance(packages, list):
-            raise ValueError("LLM did not return a JSON list")
-
-        return [pkg.strip() for pkg in packages if isinstance(pkg, str) and pkg.strip()]
-
-    except Exception as e:
-        print("Fallback to empty package list due to error:", e)
-        return []
 
 
 
@@ -713,14 +716,12 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState):
     # Format search query
     search_query = code_search_instructions.format(research_topic=state.research_topic)
     search_response = search_agent.run(search_query)
-    print("RAW SEARCH RESPONSE:\n", search_response)
+    #print("RAW SEARCH RESPONSE:\n", search_response)
 
     # Clean up <think> tags from Deepseek/LLM responses
     content = search_response.content
-    while "<think>" in content and "</think>" in content:
-        start = content.find("<think>")
-        end = content.find("</think>") + len("</think>")
-        content = content[:start] + content[end:]
+    content = remove_think_tags(content)
+    
 
     # Parse URLs returned by the search
     try:
@@ -784,7 +785,7 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState):
 
     # Run the code generation agent
     code_response = code_agent.run(prompt)
-    print("RAW CODE RESPONSE:\n", repr(code_response.content))
+    #print("RAW CODE RESPONSE:\n", repr(code_response.content))
     content = code_response.content
     code = ""
 
@@ -794,9 +795,8 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState):
     except json.JSONDecodeError:
         code = "Error: Unable to parse code response."
         
-    print("PARSED CODE:\n", code)
-    #state.code = code
-    #state.fixed_code = code # save for later sandboxing
+    #print("PARSED CODE:\n", code)
+    
 
     return code
     
@@ -817,7 +817,7 @@ def generate(state: SummaryState, config: RunnableConfig):
     """
 
     print("---GENERATING CODE SOLUTION---")
-    print(f"Current state: {state}")
+    #print(f"Current state: {state}")
 
     # State
     messages = state.messages
@@ -867,7 +867,7 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
 
     code = ""
 
-    print("state in check_code_sandbox: ", state)
+    #print("state in check_code_sandbox: ", state)
 
     print("Current state.user_feedback_processed: ", state.user_feedback_processed)
     if state.user_feedback_processed == "evaluation":
@@ -895,7 +895,7 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
         import snntorch as snn
         
     """
-    print("Code to extract imports from:\n", code)
+    #print("Code to extract imports from:\n", code)
     query = imports_extractor_instructions + "\n Code:\n" + code + "\n"
 
     response = agent.run(query)
@@ -915,14 +915,15 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
     static_evaluator = create_pyright_evaluator()
 
 
-    sandbox_execution = Sandbox.create() # with this use sbx.run_code
-
+    sandbox_execution = Sandbox.create(
+            template="code-interpreter-v1",
+    ) # with this use sbx.run_code
+    
+    metrics = sandbox_execution.get_metrics() 
+    print("Sandbox metrics:", metrics)
+    
     # Static type check
-    
     static_evaluation_result = static_evaluator(outputs=cleaned_code)
-    
- 
-
     
     # Extract dependencies via LLM
     try:
@@ -946,6 +947,8 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
             sandbox_execution.commands.run("pip install opencv-python-headless", timeout=0)
         elif pkg in ["PIL"]:
             sandbox_execution.commands.run("pip install Pillow", timeout=0)
+        elif pkg in ["torchvision"]:
+            sandbox_execution.commands.run("pip install --no-deps --only-binary=:all: torchvision", timeout=0)
         else:
             result = sandbox_execution.commands.run(f"pip install {pkg}", timeout=0)
             print(result.stdout or result.stderr)
@@ -959,6 +962,8 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
 
     # Direct execution in sandbox (outside evaluator)
     run_result = sandbox_execution.run_code(cleaned_code)
+
+    sandbox_execution.kill()
 
     print("=== STDOUT ===")
     print(run_result)
@@ -1073,7 +1078,6 @@ def collect_feedback(state: SummaryState, config: RunnableConfig):
 
     code = state.code
 
-    print("code before replace:", code)
 
     # ensure 'code' is a dict
     if isinstance(code, dict):
@@ -1111,7 +1115,7 @@ def process_feedback(state: SummaryState, config: RunnableConfig):
     """Process the user feedback and classify next action."""
     print("---PROCESSING FEEDBACK DECISION---")
 
-    print("\nstate in process feedback:", state)
+    #print("\nstate in process feedback:", state)
 
     agent = Agent(
         model=Ollama(id="deepseek-r1"),
@@ -1150,12 +1154,9 @@ def process_feedback(state: SummaryState, config: RunnableConfig):
         response_text = getattr(response, "content", str(response))
         print(f"RAW DECISION RESPONSE: {response_text}")
 
-        # TODO: This is a hack to remove the <think> tags w/ Deepseek models 
-        # It appears very challenging to prompt them out of the responses 
-        while "<think>" in response_text and "</think>" in response_text:
-            start = response_text.find("<think>")
-            end = response_text.find("</think>") + len("</think>")
-            response_text = response_text[:start] + response_text[end:]
+        
+
+        response_text = remove_think_tags(response_text)
 
         print(f"RESPONSE TEXT: {response_text}")
 
@@ -1238,6 +1239,7 @@ Task:
       Reference output: <value>
 
 - Do NOT include JSON, markdown fences, or explanations.
+- Do NOT execute the code here, just produce the script.
 - Ensure the output is pure, executable Python code.
 """
 
@@ -1248,18 +1250,7 @@ Task:
         response = agent.run(prompt)
         script_str = getattr(response, "content", str(response))
 
-        # Remove <think> artifacts
-        # while "<think>" in script_str and "</think>" in script_str:
-        #     start = script_str.find("<think>")
-        #     end = script_str.find("</think>") + len("</think>")
-        #     script_str = script_str[:start] + script_str[end:]
-
-        # Remove ``` fences if the model added them
-        # script_str = script_str.strip()
-        # if script_str.startswith("```"):
-        #     script_str = script_str.strip("`")
-        #     # sometimes comes like ```python\n...\n```
-        #     script_str = script_str.replace("python\n", "", 1).strip()
+        
 
     except Exception as e:
         print(f"An error occurred: {e}")
@@ -1312,11 +1303,9 @@ def process_feedback_normalization(state: SummaryState, config: RunnableConfig):
         response = agent.run(prompt)
         response_text = getattr(response, "content", str(response))
 
-        # Remove <think> tags if present
-        while "<think>" in response_text and "</think>" in response_text:
-            start = response_text.find("<think>")
-            end = response_text.find("</think>") + len("</think>")
-            response_text = response_text[:start] + response_text[end:]
+        
+
+        response_text = remove_think_tags(response_text)
 
         # Strip markdown code fences
         cleaned = response_text.strip()
@@ -1363,38 +1352,60 @@ def add_performance_metrics(state: SummaryState, config: RunnableConfig):
         structured_outputs=True,
     )
 
-    prompt = """
-        Task: Modify the given code to measure and report the following performance metrics for a single forward pass of each model:
+    # prompt = """
+    #     Task: Modify the given code to measure and report the following performance metrics for a single forward pass of each model:
 
-        1. Execution time of the forward pass in seconds.
-        2. Total number of trainable parameters in the model.
-        3. Memory usage (approximate GPU memory if on CUDA, otherwise CPU memory) during the forward pass.
+    #     1. Execution time of the forward pass in seconds.
+    #     2. Total number of trainable parameters in the model.
+    #     3. Memory usage (approximate GPU memory if on CUDA, otherwise CPU memory) during the forward pass.
+
+    #     Rules:
+    #     - Do not change model architectures or forward computations.
+    #     - Do not include explanations, markdown, comments outside the code, or special characters like ### or <br>.
+    #     - Output ONLY the complete Python script.
+    #     - Ensure the code works for models implemented in PyTorch, snnTorch, or similar frameworks.
+    #     - Handle models that have no trainable parameters gracefully.
+    #     - Handle models that do not implement .parameters().
+    #     - Default to torch.device('cpu') if device information is not available.
+    #     - Use safe device detection logic to avoid errors.
+    #     - If applicable, register internal state variables with the framework’s recommended method (e.g., register_buffer for PyTorch).
+
+    #     Requirements inside the script:
+    #     - Use time.time() for timing.
+    #     - Use torch.cuda.reset_peak_memory_stats() / torch.cuda.max_memory_allocated() for CUDA memory.
+    #     - Use tracemalloc for CPU memory tracking if CUDA is not available.
+    #     - Count parameters with sum(p.numel() for p in model.parameters()) if available, otherwise return 0.
+    #     - After the forward pass, print:
+    #     Model: MyNet
+    #     Forward pass time: 0.0123 s
+    #     Total parameters: 1_234
+    #     Peak memory usage: 12.3 MB
+    #     """
+
+
+    prompt = """
+        Task: Write a complete Python script that defines a reusable function to measure and report performance metrics for any PyTorch or snnTorch model on a single forward pass. The function should accept a model instance and an input tensor, then print:
+
+        Model: <class name>
+        Forward pass time: <seconds> s
+        Total parameters: <count>
+        Peak memory usage: <MB>
 
         Rules:
-        - Do not change model architectures or forward computations.
+        - Do not modify model architectures or forward computations.
         - Do not include explanations, markdown, comments outside the code, or special characters like ### or <br>.
         - Output ONLY the complete Python script.
-        - Ensure the code works for models implemented in PyTorch, snnTorch, or similar frameworks.
-        - Handle models that have no trainable parameters gracefully.
-        - Handle models that do not implement .parameters().
-        - Default to torch.device('cpu') if device information is not available.
-        - Use safe device detection logic to avoid errors.
-        - If applicable, register internal state variables with the framework’s recommended method (e.g., register_buffer for PyTorch).
-
-        Requirements inside the script:
+        - Handle models with no trainable parameters gracefully.
+        - Handle models without .parameters() gracefully.
+        - Default to torch.device("cpu") if device is not available.
+        - Use safe device detection logic.
         - Use time.time() for timing.
         - Use torch.cuda.reset_peak_memory_stats() / torch.cuda.max_memory_allocated() for CUDA memory.
         - Use tracemalloc for CPU memory tracking if CUDA is not available.
-        - Count parameters with sum(p.numel() for p in model.parameters()) if available, otherwise return 0.
-        - After the forward pass, print:
-        Model: MyNet
-        Forward pass time: 0.0123 s
-        Total parameters: 1_234
-        Peak memory usage: 12.3 MB
-        """
+        - Count parameters with sum(p.numel() for p in model.parameters()) if available, else return 0.
+        - After execution, demonstrate the function on two models: one "reference model" and one "generated model" (both can be simple PyTorch nn.Module examples).
 
-
-
+    """
 
 
 

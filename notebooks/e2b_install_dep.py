@@ -8,12 +8,18 @@ from openevals.code.e2b.execution import create_e2b_execution_evaluator
 #template_id = 'k0wmnzir0zuzye6dndlw' 
 # Pass the template ID to the `Sandbox.create` method
 #sbx = Sandbox.create(template_id = template_id) 
-sbx = Sandbox.create()
+#sbx = Sandbox.create()
+
+# Create a sandbox from the 'code-interpreter-v1' template
+sbx = Sandbox.create(
+    template="code-interpreter-v1",
+    
+)
 
 sbx.commands.run("python -m pip install --upgrade pip", timeout=0)
 
 # Install torch with no timeout
-sbx.commands.run("pip install torch --index-url https://download.pytorch.org/whl/cpu", timeout=0)
+#sbx.commands.run("pip install torch --index-url https://download.pytorch.org/whl/cpu", timeout=0)
 
 evaluator = create_e2b_execution_evaluator(sandbox=sbx)
 
@@ -73,6 +79,10 @@ print(eval_result)
 # Direct execution in sandbox (outside evaluator)
 run_result = sbx.run_code(CODE)
 
+# SandBox metrics are in a private beta for now
+metrics = sbx.get_metrics() 
+print("Sandbox metrics:", metrics)
+
 print("=== STDOUT ===")
 print(run_result)
 
@@ -85,6 +95,4 @@ print(run_result.__dict__)  # Or vars(result) — shows what's available
     # Install torch with no timeout 
     #sandbox_execution.commands.run("pip install torch --index-url https://download.pytorch.org/whl/cpu", timeout=0)
 
-    # SandBox metrics are in a private beta for now
-    # metrics = sandbox.get_metrics() 
-    # print("Sandbox metrics:", metrics)
+sbx.kill()
