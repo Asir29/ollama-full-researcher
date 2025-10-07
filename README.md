@@ -11,11 +11,10 @@ Give it a topic and the CodeEval Researcher can satisfy three kind of tasks:
 - Code generation and Evaluation
 
 ## 🎬 Demo
-[Watch the demo video for code generation and execution.](
-  ./assets/example_direct_execution.mp4
-)
+![Alt Text](./assets/gif_exec.gif)
 
-In this specific example, you can observe:  
+
+In this specific Demo, you can observe:  
 - A query related to snnTorch,  
 - Code generation followed by static evaluation,  
 - A fix requested by the user,  
@@ -38,6 +37,49 @@ If you want to install a new module:
 1. find your environment path (use *conda env list*)
 2. *path/to/your/env/bin/python -m pip install ...*
 3. check if has been installed (*conda list*)
+
+
+## Ollama Setup
+
+<img src="./assets/ollama.png" alt="Ollama Logo" width="100"/>
+
+
+Install Ollama by following the official instructions here:  
+👉 [https://ollama.com/download](https://ollama.com/download)
+
+---
+
+### Start the Ollama server
+
+Open a terminal and run:  
+
+ollama serve
+
+---
+
+
+---
+
+### Pull the models used by this project
+
+Run the following commands in your terminal:  
+
+ollama pull qwen3:latest
+ollama pull deepseek-r1:latest
+ollama pull gpt-oss:20b
+ollama pull mistral:latest
+
+---
+
+---
+
+### List downloaded models
+
+To see all models you have installed, run: 
+
+ollama list
+
+---
 
 
 ## How it Works
