@@ -189,3 +189,60 @@ Rules:
 Perform the search now for the following query: "{research_topic}"
 """
 
+code_normalization_instructions = """\
+You are a code normalization assistant.
+
+You will be given two Python code snippets:
+
+<<GENERATED>>
+{code}
+<<END_GENERATED>>
+
+<<REFERENCE>>
+{research_topic}
+<<END_REFERENCE>>
+
+Your goal:
+Produce ONE self-contained, executable Python script that compares both snippets.
+
+### Requirements
+
+1. **Script structure**
+   The output must have two clearly labeled sections:
+   - ### Generated code
+     - Include the provided GENERATED snippet **verbatim**.
+     - Do NOT change its internal logic, classes, or functions.
+     - You may only add minimal wrapping (imports, variable definitions, or input setup) 
+       so it can run using the same `TOY_INPUT` as the reference.
+   - ### Reference code
+     - Include the provided REFERENCE snippet.
+     - Do NOT change its internal logic or functions.
+     - Only adjust its input handling if necessary so it can run on the same `TOY_INPUT`.
+
+2. **Input handling**
+   - Both sections must share the same `TOY_INPUT`.
+   - Define `TOY_INPUT` once, before both executions.
+
+3. **Execution**
+   - At the end of the script:
+     - Instantiate any required classes or modules.
+     - Run both sections on `TOY_INPUT`.
+     - Print the results clearly as:
+       ```
+       Generated output: <value>
+       Reference output: <value>
+       ```
+   - Ensure the code can execute without external dependencies other than PyTorch.
+
+4. **Output formatting**
+   - The final output must be **pure Python code**.
+   - No Markdown, no explanations, no JSON, no text outside the Python script.
+   - Indentation and syntax must be valid.
+
+5. **Error resilience**
+   - If either snippet cannot run as-is (e.g., missing functions or variables),
+     add minimal scaffolding (dummy class/function) to make the script runnable,
+     but do not alter existing logic.
+
+Your output should be a single Python script that can be copy-pasted and executed directly.
+"""

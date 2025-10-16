@@ -87,7 +87,7 @@ from src.assistant.prompts import (
     query_writer_instructions, summarizer_instructions, reflection_instructions,
     web_search_instructions, web_search_description, web_search_expected_output,
     router_instructions, code_assistant_instructions, academic_summarizer_instructions,
-    code_reflection_instructions, code_search_instructions
+    code_reflection_instructions, code_search_instructions, code_normalization_instructions
 )
 
 # -------------------------
@@ -785,7 +785,6 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState):
 
     # Run the code generation agent
     code_response = code_agent.run(prompt)
-    #print("RAW CODE RESPONSE:\n", repr(code_response.content))
     content = code_response.content
     code = ""
 
@@ -795,7 +794,6 @@ def generate_code(question: str, config: RunnableConfig, state: SummaryState):
     except json.JSONDecodeError:
         code = "Error: Unable to parse code response."
         
-    #print("PARSED CODE:\n", code)
     
 
     return code
@@ -1203,51 +1201,13 @@ def code_normalization(state: SummaryState, config: RunnableConfig):
         structured_outputs=True,
     )
 
-    prompt = f"""
-You are a code normalization assistant.
-
-You are given two Python code snippets:
-
-<<GENERATED>>
-{state.code}
-<<END_GENERATED>>
-
-<<REFERENCE>>
-{state.research_topic}
-<<END_REFERENCE>>
-
-Task:
-
-- Produce ONE self-contained Python script as output.
-- The script must contain two clear sections:
-
-    ### Generated code
-    - Include the generated snippet **exactly as provided**.
-    - Do not modify the internal logic, classes, or functions.
-    - Only wrap it so it can run on the same TOY_INPUT as the reference code.
-
-    ### Reference code
-    - Include the reference snippet.
-    - If needed, adapt its input handling so it can run on the same TOY_INPUT.
-
-- Both sections MUST use the **same TOY_INPUT**.
-- At the end of the script:
-    - Instantiate any classes or functions needed.
-    - Run both sections on TOY_INPUT.
-    - Print both outputs clearly, like:
-      Generated output: <value>
-      Reference output: <value>
-
-- Do NOT include JSON, markdown fences, or explanations.
-- Do NOT execute the code here, just produce the script.
-- Ensure the output is pure, executable Python code.
-"""
-
-
+    
     script_str = ""
 
+    code_normalization_query = code_normalization_instructions.format(code=state.code, research_topic=state.research_topic)
+
     try:
-        response = agent.run(prompt)
+        response = agent.run(code_normalization_query)
         script_str = getattr(response, "content", str(response))
 
         
@@ -1450,13 +1410,10 @@ builder.add_node("generate_academic_query", generate_academic_query)
 builder.add_node("search_relevant_sources", search_relevant_sources)
 
 builder.add_node("generate", generate)  # generation solution
-#builder.add_node("check_code", code_check)  # check code
-#builder.add_node("continue_generation", continue_generation)
 builder.add_node("collect_feedback", collect_feedback)
 builder.add_node("process_feedback", process_feedback)
 builder.add_node("check_code_sandbox", check_code_sandbox)  # check code in sandbox
 builder.add_node("reflection", reflection)  # reflect on code errors
-#builder.add_node("evaluation", evaluation) # perform a systematic evaluation with groud truth code
 
 builder.add_node("collect_feedback_evaluation", collect_feedback_evaluation)  # collect feedback for evaluation
 builder.add_node("code_normalization", code_normalization)  # process feedback for evaluation
@@ -1494,7 +1451,6 @@ builder.add_edge("summarize_academic_sources", END)
 
 builder.add_edge("search_relevant_sources", "generate")
 
-#builder.add_edge("generate", "check_code_sandbox")
 builder.add_edge("generate", "collect_feedback")
 
 builder.add_edge("check_code_sandbox", "reflection")
@@ -1516,10 +1472,8 @@ builder.add_conditional_edges(
 )
 
 builder.add_edge("collect_feedback_evaluation", "code_normalization")
-#builder.add_edge("evaluation", END)
 builder.add_edge("code_normalization", "collect_feedback_normalization")
 builder.add_edge("collect_feedback_normalization", "process_feedback_normalization")
-#builder.add_edge("process_feedback_normalization", "check_code_sandbox")
 builder.add_edge("process_feedback_normalization", "add_performance_metrics")
 builder.add_edge("add_performance_metrics", "check_code_sandbox")
 
