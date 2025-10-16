@@ -1,78 +1,159 @@
+# 🧠 Ollama CodeEval Researcher
 
+**Ollama CodeEval Researcher** is a fully local **coder–evaluator and research assistant** powered by any LLM hosted via [Ollama](https://ollama.com/search).
 
-
-
-# Ollama CodeEval Researcher
-Ollama CodeEval Researcher is a fully local coder-evaluator/research assistant that uses any LLM hosted by [Ollama](https://ollama.com/search).
-The project was forked by https://github.com/CopilotKit/ollama-deep-researcher, which implemented only the web research branch of my project.
-Give it a topic and the CodeEval Researcher can satisfy three kind of tasks:
-- General Web Researches (as the original project proposed)
-- Academic Source Researches
-- Code generation and Evaluation
-
-## 🎬 Demo
-[Watch the demo video for code generation and execution.](
-  ./assets/example_direct_execution.mp4
-)
-
-In this specific example, you can observe:  
-- A query related to snnTorch,  
-- Code generation followed by static evaluation,  
-- A fix requested by the user,  
-- The final successful execution of the corrected code.
-
-
-
-## 🚀 Quickstart
-### Windows
-
-Installation *with conda*
-
-
-1. *conda env create -f environment.yaml*
-2. *conda activate ollama_full_research*
-3. (beeing in the project directory) -> *langgraph dev --no-reload*
-
-If you want to install a new module:
-
-1. find your environment path (use *conda env list*)
-2. *path/to/your/env/bin/python -m pip install ...*
-3. check if has been installed (*conda list*)
-
-
-## How it Works
-
-The Ollama CodeEval Researcher organizes its workflow into three separate but connected branches, managed by a state machine. Each branch specializes in a specific area of the autonomous agent's tasks:
-
-### 1. Web Research Branch 🌐 
-This branch handles general queries that require gathering information from the web. Its responsibilities include:  
-- Using large language models to generate refined web search queries.  
-- Retrieving relevant documents and data from multiple web search engines.  
-- Summarizing the collected web content to extract key insights.  
-- Reflecting on the summaries to create follow-up queries, thus deepening the research.
-
-### 2. Academic Research Branch 📚
-Focused on scholarly research, this branch:  
-- Creates targeted queries for academic databases and APIs such as Google Scholar and Semantic Scholar.  
-- Crawls specialized academic resources to build a semantic search index tailored to scientific literature.  
-- Summarizes the academic findings to condense relevant knowledge.
-
-### 3. Code Generation and Evaluation Branch 💻 🛡️
-This branch is responsible for autonomous code creation and quality assurance:  
-- Builds and maintains a vectorstore based on the latest snnTorch documentation (the source documentation is easily updated by changing the link) to address snnTorch-related queries effectively.  
-- Performs retrieval-augmented generation (RAG) combining relevant web resources related to each query.  
-- Applies static analysis on generated code and evaluates it through optional execution.  
-- Automatically extracts and installs required dependencies by analyzing import statements within the code.  
-- Runs the generated code in a secure, isolated sandbox environment that installs dependencies dynamically and safely.  
-- Collects execution feedback, detects errors, and uses user or automated feedback to iteratively improve and normalize the code.
+Originally forked from [CopilotKit/ollama-deep-researcher](https://github.com/CopilotKit/ollama-deep-researcher), this enhanced version extends the original web research concept with **academic exploration** and **autonomous code generation + evaluation**.
 
 ---
 
-## Frontend
+## 🎯 Core Capabilities
 
-To visualize the system’s workflow, the LangSmith frontend can be used by running the command:  
-*langgraph dev*
+The CodeEval Researcher can perform three main types of tasks:
 
-⚠️ Note that the current application does not include a custom frontend implementation.
+1. 🌐 **General Web Research** — deep information gathering across the internet.  
+2. 📚 **Academic Source Research** — exploration of scholarly papers and databases.  
+3. 💻 **Code Generation & Evaluation** — autonomous code creation, static analysis, and sandboxed execution.
 
+---
 
+## 🎬 Demo
+
+![Demo Preview](./assets/gif_exec.gif)
+
+In this demo, you can see:
+- A query related to **snnTorch**
+- **Code generation** followed by **static evaluation**
+- A **user-requested fix**
+- The **final successful execution** of the corrected code
+
+---
+
+## 🚀 Quickstart
+
+### 🪟 Windows Installation (with Conda)
+
+1. Create the environment  
+   → `conda env create -f environment.yaml`  
+
+2. Activate the environment  
+   → `conda activate ollama_full_research`  
+
+3. From the project directory, start the development server  
+   → `langgraph dev --no-reload`
+
+---
+
+### 🧩 Installing New Modules
+
+1. Find your environment path  
+   → `conda env list`  
+
+2. Install the desired package  
+   → `path/to/your/env/bin/python -m pip install <package-name>`  
+
+3. Verify the installation  
+   → `conda list`
+
+---
+
+## 🦙 Ollama Setup
+
+<img src="./assets/ollama.png" alt="Ollama Logo" width="100"/>
+
+### 📦 Install Ollama  
+Follow the official installation guide:  
+👉 [https://ollama.com/download](https://ollama.com/download)
+
+---
+
+### 🧭 Start the Ollama Server  
+Open a terminal and run:  
+→ `ollama serve`
+
+---
+
+### 🤖 Pull the Required Models  
+Run these commands to download the models used in this project:  
+→ `ollama pull qwen3:latest`  
+→ `ollama pull deepseek-r1:latest`  
+→ `ollama pull gpt-oss:20b`  
+→ `ollama pull mistral:latest`
+
+---
+
+### 🧾 List Installed Models  
+To see all installed models:  
+→ `ollama list`
+
+---
+
+## 🧪 Sandbox Environment Setup
+
+To use the sandbox, you only need an **API key** from [e2b.dev](https://e2b.dev/).
+
+1. Get your API key from [https://e2b.dev/](https://e2b.dev/).  
+2. Create a `.env` file in the **root directory** of the project (if it doesn’t exist).  
+3. Add your key like this:  
+   `E2B_API_KEY="your_api_key_here"`
+
+---
+
+## ⚙️ How It Works
+
+The **Ollama CodeEval Researcher** operates through three interconnected branches, coordinated by a state machine. Each branch focuses on a specific task type:
+
+---
+
+### 🌐 1. Web Research Branch
+Responsible for general web exploration:  
+- Generates optimized search queries using LLMs  
+- Gathers and summarizes online content  
+- Performs reflective reasoning to refine searches and deepen analysis  
+
+---
+
+### 📚 2. Academic Research Branch
+Handles scholarly and scientific research:  
+- Queries academic APIs such as Google Scholar and Semantic Scholar  
+- Builds a semantic index of papers for context-aware retrieval  
+- Summarizes findings into concise insights  
+
+---
+
+### 💻 3. Code Generation & Evaluation Branch
+Focused on code creation, analysis, and execution:  
+- Builds and maintains a **vectorstore** from documentation (e.g., snnTorch)  
+- Performs **Retrieval-Augmented Generation (RAG)** for context-aware coding  
+- Executes **static analysis** and **safe sandbox evaluation**  
+- Detects and installs missing dependencies automatically  
+- Runs code in a **secure isolated environment**  
+- Learns from feedback to iteratively improve generated solutions  
+
+---
+
+## 🖥️ Frontend Visualization
+
+To visualize the system’s workflow with **LangGraph’s frontend**, run:  
+→ `langgraph dev`
+
+⚠️ *Note:* The current version does **not** include a custom frontend implementation.
+
+---
+
+## 💡 Summary
+
+| Feature | Description |
+|----------|--------------|
+| 🔒 **Local-first** | Runs entirely on your machine via Ollama |
+| 🧠 **Intelligent Research** | Web + academic data synthesis |
+| 💻 **Code Capabilities** | Autonomous code generation and evaluation |
+| 🧪 **Safe Execution** | Secure sandboxing powered by [e2b.dev](https://e2b.dev/) |
+
+---
+
+## ✨ Credits
+
+- Forked from [CopilotKit/ollama-deep-researcher](https://github.com/CopilotKit/ollama-deep-researcher)  
+- Enhanced to include **academic research**, **code generation**, and **evaluation mechanisms**
+
+---
