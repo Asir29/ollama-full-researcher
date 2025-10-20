@@ -55,6 +55,7 @@ from langchain_ollama import ChatOllama     # LangChain wrapper for Ollama
 from agno.tools.googlesearch import GoogleSearchTools  # Google search
 from agno.tools.duckduckgo import DuckDuckGoTools      # DuckDuckGo search
 from agno.tools.baidusearch import BaiduSearchTools    # Baidu search
+from agno.tools.tavily import TavilyTools
 from scholarly import scholarly                        # Google Scholar search
 from semanticscholar import SemanticScholar            # Semantic Scholar API
 
@@ -292,8 +293,8 @@ async def web_research(state: SummaryState, config: RunnableConfig):
     configurable = Configuration.from_runnable_config(config)
     # Search the web
     agent = Agent(
-        model=Ollama(id="mistral:latest"),
-        tools=[GoogleSearchTools()],
+        model=Ollama(id="qwen3:latest"),
+        tools=[TavilyTools()], #GoogleSearchTools() DuckDuckGoTools()
         show_tool_calls=False,
         markdown=True
         
@@ -303,6 +304,8 @@ async def web_research(state: SummaryState, config: RunnableConfig):
     #run_response = agent.run(query)
     #run_response = await agent.arun(query)  # ✅ Non-blocking!
     run_response = await asyncio.to_thread(lambda: agent.run(query))
+
+    print("RAW SEARCH RESPONSE:\n", run_response)
 
     content = run_response.content
 
@@ -874,7 +877,7 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
         code = state.code # from code generation step
 
     agent = Agent(
-        model=Ollama(id="mistral:latest"),
+        model=Ollama(id="qwen3:latest"),
         tools=[],
         show_tool_calls=False,
         use_json_mode=False,
@@ -991,9 +994,6 @@ def reflection(state: SummaryState, config: RunnableConfig):
     execution_feedback = state.sandbox_feedback_execution
     print("PYRIGHT FEEDBACK:", pyright_feedback)
 
-    #if(pyright_feedback['key'] == "pyright_succeeded" and execution_feedback['key'] == "execution_succeeded"):
-    #    print("---NO ERRORS---")
-    #    return {"route": "no_errors"}  # Return a dictionary
     
     agent = Agent(
         model=Ollama(id="mistral:latest"),
@@ -1312,35 +1312,7 @@ def add_performance_metrics(state: SummaryState, config: RunnableConfig):
         structured_outputs=True,
     )
 
-    # prompt = """
-    #     Task: Modify the given code to measure and report the following performance metrics for a single forward pass of each model:
-
-    #     1. Execution time of the forward pass in seconds.
-    #     2. Total number of trainable parameters in the model.
-    #     3. Memory usage (approximate GPU memory if on CUDA, otherwise CPU memory) during the forward pass.
-
-    #     Rules:
-    #     - Do not change model architectures or forward computations.
-    #     - Do not include explanations, markdown, comments outside the code, or special characters like ### or <br>.
-    #     - Output ONLY the complete Python script.
-    #     - Ensure the code works for models implemented in PyTorch, snnTorch, or similar frameworks.
-    #     - Handle models that have no trainable parameters gracefully.
-    #     - Handle models that do not implement .parameters().
-    #     - Default to torch.device('cpu') if device information is not available.
-    #     - Use safe device detection logic to avoid errors.
-    #     - If applicable, register internal state variables with the framework’s recommended method (e.g., register_buffer for PyTorch).
-
-    #     Requirements inside the script:
-    #     - Use time.time() for timing.
-    #     - Use torch.cuda.reset_peak_memory_stats() / torch.cuda.max_memory_allocated() for CUDA memory.
-    #     - Use tracemalloc for CPU memory tracking if CUDA is not available.
-    #     - Count parameters with sum(p.numel() for p in model.parameters()) if available, otherwise return 0.
-    #     - After the forward pass, print:
-    #     Model: MyNet
-    #     Forward pass time: 0.0123 s
-    #     Total parameters: 1_234
-    #     Peak memory usage: 12.3 MB
-    #     """
+    
 
 
     prompt = """

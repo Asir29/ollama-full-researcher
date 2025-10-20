@@ -119,15 +119,23 @@ web_search_description = """You are a distinguished AI research with expertise
     
     """
 
-web_search_instructions ="""\
-        You are a usefull agent that given a query and a tool for searching the web, 
-        you call it accordingly in order to found the best matching resources relevant to the query.
-        Doing that, you  must respect the following instructions:
-        - You must separate each source in a structured way. 
-        - for each source you need to append the title of the page, the url of the website from where the information was extracted,
-        and the summary of the most relevant information found in the page.
+web_search_instructions = """
+    You are a helpful web research agent.
+    You have access to a tool.
+    You MUST call the tool to retrieve the most up-to-date web results.
+    Do NOT answer using pretraining knowledge.
 
-    """
+    Steps to follow:
+    1. Call the tool with the query.
+    2. For each source you get, provide:
+      - Title of the page
+      - URL of the website
+      - Summary of the most relevant information (2–3 sentences)
+    3. Return a clearly structured list of all sources.
+
+    Only after retrieving the results should you generate a final answer.
+  """
+
 
                 
 web_search_expected_output = """ \
