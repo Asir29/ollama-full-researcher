@@ -58,6 +58,8 @@ from agno.tools.baidusearch import BaiduSearchTools    # Baidu search
 from agno.tools.tavily import TavilyTools
 from scholarly import scholarly                        # Google Scholar search
 from semanticscholar import SemanticScholar            # Semantic Scholar API
+from agno.tools.arxiv import ArxivTools
+
 
 # -------------------------
 # HTML / Web Parsing
@@ -539,26 +541,44 @@ async def generate_academic_query(state: SummaryState, config: RunnableConfig):
 
 
 
+# async def academic_research(state, config, papers_limit=3):
+#     query = state.get("search_query") if isinstance(state, dict) else getattr(state, "search_query", "")
+
+#     # scholarly is synchronous, so run in a thread to avoid blocking event loop
+#     def fetch_papers():
+#         search_query = scholarly.search_pubs(query)
+#         results = []
+#         for _ in range(papers_limit):
+#             try:
+#                 paper = next(search_query)
+#                 title = paper.get('bib', {}).get('title', 'No title')
+#                 abstract = paper.get('bib', {}).get('abstract', 'No abstract')
+#                 results.append(f"{title} - {abstract}")
+#             except StopIteration:
+#                 break
+#         return results
+
+#     abstracts = await asyncio.to_thread(fetch_papers)
+
+#     return {"academic_source_content": abstracts}
+
+
 async def academic_research(state, config, papers_limit=3):
     query = state.get("search_query") if isinstance(state, dict) else getattr(state, "search_query", "")
 
-    # scholarly is synchronous, so run in a thread to avoid blocking event loop
-    def fetch_papers():
-        search_query = scholarly.search_pubs(query)
-        results = []
-        for _ in range(papers_limit):
-            try:
-                paper = next(search_query)
-                title = paper.get('bib', {}).get('title', 'No title')
-                abstract = paper.get('bib', {}).get('abstract', 'No abstract')
-                results.append(f"{title} - {abstract}")
-            except StopIteration:
-                break
-        return results
+    agent = Agent(
+        model=Ollama(id="qwen3:latest"),
+        tools=[ArxivTools()],
+        show_tool_calls=False,
+        markdown=True
+        
+    )
 
-    abstracts = await asyncio.to_thread(fetch_papers)
-
-    return {"academic_source_content": abstracts}
+    academic_query = f"Search for academic papers on the following topic: {query}\n"
+    run_response = await asyncio.to_thread(lambda: agent.run(academic_query))
+    print("RAW ACADEMIC SEARCH RESPONSE:\n", run_response)
+    content = run_response.content
+    return {"academic_source_content": content}
 
 
 

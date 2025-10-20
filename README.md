@@ -87,6 +87,17 @@ To see all installed models:
 
 ---
 
+## 🔎 Tavily Setup
+
+To use the Tavily to perform web researches, you only need an **API key** from [tavily](https://www.tavily.com/).
+
+1. Get your API key from [https://www.tavily.com/](https://www.tavily.com/).  
+2. Create a `.env` file in the **root directory** of the project (if it doesn’t exist).  
+3. Add your key like this:  
+   `TAVILY_API_KEY="your_api_key_here"`
+
+---
+
 ## 🧪 Sandbox Environment Setup
 
 To use the sandbox, you only need an **API key** from [e2b.dev](https://e2b.dev/).
