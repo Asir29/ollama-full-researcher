@@ -526,7 +526,7 @@ async def generate_academic_query(state: SummaryState, config: RunnableConfig):
     llm_json_mode = ChatOllama(model=configurable.local_llm, temperature=0, format="json")
     result = await llm_json_mode.ainvoke(
         [SystemMessage(content=query_writer_instructions_formatted),
-        HumanMessage(content=f"Generate a query for web search:")]
+        HumanMessage(content=f"Generate a query for an academic search:")]
     )   
     query = json.loads(result.content)
     
