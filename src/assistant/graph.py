@@ -33,6 +33,8 @@ from langchain_core.messages import HumanMessage, SystemMessage, AIMessage  # LL
 from langchain_core.runnables import RunnableConfig         # For running pipelines
 from langchain_core.prompts import ChatPromptTemplate       # Prompt templates
 from langchain.text_splitter import RecursiveCharacterTextSplitter  # Text splitting utilities
+from langchain_community.document_loaders import DirectoryLoader
+
 
 # -------------------------
 # LangChain Community Loaders / Vectorstores / Embeddings
@@ -669,24 +671,101 @@ class SentenceTransformerEmbeddings(Embeddings):
         return self.model.encode([text])[0].tolist()
 
 
+# SNN Network Adaptation Agent
+def snnTorch_agent(question: str, config: RunnableConfig, state: SummaryState):
+    """
+    Handles queries involving SNN network design, adaptation, or explainability using snnTorch.
+    Returns code or workflow modifications as needed.
+    """
+    print("--- SNNTorch AGENT ---")
+    # (A) Load snnTorch docs context (same as your main routine, use snnTorch paths/config)
+    embedding_model = SentenceTransformerEmbeddings("mchochlov/codebert-base-cd-ft")
+    vectorstore = Chroma(
+        embedding_function=embedding_model,
+        collection_name="snntorch-docs",
+        persist_directory="./chroma_snn_docs"
+    )
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+    snn_context = "\n\n".join([doc.page_content for doc in retriever.get_relevant_documents(question)])
+
+    # (B) Construct prompt for code adaptation
+    prompt = (
+        "Given SNN context:\n" + snn_context +
+        "\nAdapt or implement the following:\n" + question +
+        "\nUse snnTorch conventions and maintain modular code."
+    )
+
+    agent = Agent(
+        model=Ollama(id="gpt-oss:20b"),
+        tools=[],
+        show_tool_calls=False,
+        use_json_mode=True,
+    )
+    response = agent.run(prompt)
+    try:
+        content = json.loads(response.content or "{}")
+        code = content.get("code", "")
+    except json.JSONDecodeError:
+        code = "Error: Unable to parse SNNTorch agent response."
+    return code
+
+
+# NNI Experiment Adaptation Agent
+def nni_agent(question: str, config: RunnableConfig, state: SummaryState):
+    """
+    Handles queries for NNI experiment setup, tuning, adaptation, or config generation.
+    Returns YAML config/code for NNI usage.
+    """
+    print("--- NNI AGENT ---")
+    # (A) Load NNI docs/context if needed (adapt path as required)
+    embedding_model = SentenceTransformerEmbeddings("mchochlov/codebert-base-cd-ft")
+    vectorstore = Chroma(
+        embedding_function=embedding_model,
+        collection_name="nni-docs",
+        persist_directory="./chroma_nni_docs"
+    )
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+    nni_context = "\n\n".join([doc.page_content for doc in retriever.get_relevant_documents(question)])
+
+    # (B) Construct NNI experiment adaptation prompt
+    prompt = (
+        "Given NNI context:\n" + nni_context +
+        "\nAdapt or implement the following NNI experiment/code request:\n" + question +
+        "\nOutput valid NNI YAML config and pipeline code."
+    )
+
+    agent = Agent(
+        model=Ollama(id="gpt-oss:20b"),
+        tools=[],
+        show_tool_calls=False,
+        use_json_mode=True,
+    )
+    response = agent.run(prompt)
+    try:
+        content = json.loads(response.content or "{}")
+        code = content.get("code", "")
+    except json.JSONDecodeError:
+        code = "Error: Unable to parse NNI agent response."
+    return code
+
 
 
 
 
 def search_relevant_sources(state: SummaryState, config: RunnableConfig):
     """
-    Crawls the SNN documentation site and creates a persisted vectorstore.
-    Skips building if the vectorstore already exists.
+    Creation of vectorstore from docs of interest.
     """
-    persist_dir = "./chroma_snn_docs"
+    persist_dir_snn = "./chroma_snn_docs"
+    persist_dir_nni = "./chroma_nni_docs"
 
     # ✅ Skip build if already exists
-    if os.path.exists(persist_dir) and os.listdir(persist_dir):
-        print(f"Vectorstore already exists at {persist_dir}, skipping build.")
+    if os.path.exists(persist_dir_snn) and os.listdir(persist_dir_snn) and os.path.exists(persist_dir_nni) and os.listdir(persist_dir_nni):
+        print(f"Vectorstores already exist at {persist_dir_snn} and {persist_dir_nni} , skipping build.")
         return {"status": "vectorstore_already_exists"}
 
-    print("---CREATING SNN VECTORSTORE---")
 
+    print("---CREATING SNN VECTORSTORE---")
     # 1️⃣ Crawl SNN docs
     loader = RecursiveUrlLoader(
         url="https://snntorch.readthedocs.io/en/latest/",
@@ -705,124 +784,104 @@ def search_relevant_sources(state: SummaryState, config: RunnableConfig):
         documents=doc_splits,
         embedding=embedding_model,
         collection_name="snntorch-docs",
-        persist_directory=persist_dir
+        persist_directory=persist_dir_snn
     )
     vectorstore.persist()
-    print(f"SNN vectorstore persisted at '{persist_dir}'")
+    print(f"SNN vectorstore persisted at '{persist_dir_snn}'")
 
+    ### 4️⃣ Repeat for NNI docs (local directory)
+    persist_dir_nni = "./chroma_nni_docs"
+    if os.path.exists(persist_dir_nni) and os.listdir(persist_dir_nni):
+        print(f"NNI vectorstore already exists at {persist_dir_nni}, skipping build.")
+        return {"status": "vectorstore_already_exists"}
+
+    print("---CREATING NNI VECTORSTORE---")
+    # Loader for all documents in the local directory `esempi_NNI`
+
+    # Load with optional file extension filtering (e.g., ".md", ".txt", ".html", ".pdf")
+    directory_loader = DirectoryLoader(
+        path="esempi_NNI",                  # <--- your local NNI docs directory
+        glob="**/*",                        # all files, or specify "*.md"/"*.txt" as needed
+        show_progress=True
+    )
+    nni_docs = directory_loader.load()
+    print(f"Loaded {len(nni_docs)} NNI docs from directory")
+
+    # Split NNI docs just like above
+    nni_doc_splits = load_and_split(nni_docs, chunk_size=512, overlap=50)
+
+    # Create and persist NNI vectorstore
+    vectorstore_nni = Chroma.from_documents(
+        documents=nni_doc_splits,
+        embedding=embedding_model,
+        collection_name="nni-docs",
+        persist_directory=persist_dir_nni
+    )
+    vectorstore_nni.persist()
+    print(f"NNI vectorstore persisted at '{persist_dir_nni}'")
     return {"status": "vectorstore_created"}
 
 
 
-
-
 def generate_code(question: str, config: RunnableConfig, state: SummaryState):
-
-
     print("--- GENERATING CODE ---")
 
-    # -------------------------
-    # 1️⃣ Web Search for User URLs
-    # -------------------------
-    # Use search tools
-    duck_tool = DuckDuckGoTools(fixed_max_results=3)
-    google_tool = GoogleSearchTools(proxy=None)  # or proxy="http://your_proxy:port"
-    baidusearch_tool = BaiduSearchTools(fixed_max_results=3)
+    # Register tool functions as callables with schema descriptions for agent
+    available_tools = [
+        {
+            "name": "snnTorch_agent",
+            "function": lambda q: snnTorch_agent(q, config, state),
+            "description": "Adapt, design, or modify Spiking Neural Network (SNN) code using snnTorch, given datasets or requirements."
+        },
+        {
+            "name": "nni_agent",
+            "function": lambda q: nni_agent(q, config, state),
+            "description": "Design, adapt, or tune a Neural Network Intelligence (NNI) experiment, including YAML configs or hyperparameter search, given problem specs."
+        }
+    ]
 
-    search_agent = Agent(
-        model=Ollama(id="qwen3:latest"),
-        tools=[google_tool],
-        show_tool_calls=True,
-        markdown=False
+    # Agent system prompt: Instruct the LLM when and why to call each tool
+    tool_selection_prompt = (
+        "You are a code generation agent able to use the following specialized tools:\n"
+        "- snnTorch_agent: For any code modifications, designs, or adaptations involving Spiking Neural Networks (SNNs) or snnTorch.\n"
+        "- nni_agent: For any experiment configuration, tuning, or automation involving NNI (Neural Network Intelligence).\n"
+        "For each input query, decide if any tool should be used. Only call a tool if the request is related to its specialization. "
+        "Otherwise, generate the code directly.\n"
+        "Always return the complete code needed, integrating tool outputs when relevant. "
+        "You are given access to previous code as context."
     )
 
-    # Format search query
-    search_query = code_search_instructions.format(research_topic=state.research_topic)
-    search_response = search_agent.run(search_query)
-    #print("RAW SEARCH RESPONSE:\n", search_response)
-
-    # Clean up <think> tags from Deepseek/LLM responses
-    content = search_response.content
-    content = remove_think_tags(content)
-    
-
-    # Parse URLs returned by the search
-    try:
-        data = json.loads(content or "{}")
-        urls = data.get("urls", [])
-    except json.JSONDecodeError:
-        urls = []
-    print(f"User URLs: {urls}")
-
-    # Load content from user-specified URLs
-    url_docs = []
-    for url in urls:
-        url_docs.extend(WebBaseLoader(url).load())
-    url_context = "\n\n".join([doc.page_content for doc in url_docs])
-
-    # -------------------------
-    # 2️⃣ Load SNN Documentation Vectorstore
-    # -------------------------
-    embedding_model = SentenceTransformerEmbeddings("mchochlov/codebert-base-cd-ft")
-    #embedding_model = SentenceTransformerEmbeddings("nomic-ai/CodeRankEmbed")
-
-    # Load persisted vectorstore
-    vectorstore = Chroma(
-        embedding_function=embedding_model,
-        collection_name="snntorch-docs",
-        persist_directory="./chroma_snn_docs"
-    )
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
-
-    # Retrieve relevant SNN docs
-    snn_relevant = retriever.get_relevant_documents(state.research_topic)
-    snn_context = "\n\n".join([doc.page_content for doc in snn_relevant])
-
-    # -------------------------
-    # 3️⃣ Combine contexts
-    # -------------------------
-    combined_context = snn_context + "\n\n" + url_context
-
-    # -------------------------
-    # 4️⃣ Construct prompt for code generation
-    # -------------------------
+    # Construct agent with tool selection ability
     code_agent = Agent(
         model=Ollama(id="gpt-oss:20b"),
-        tools=[],
-        show_tool_calls=False,
+        tools=[(tool["function"], tool["name"], tool["description"]) for tool in available_tools],
+        show_tool_calls=True,
         use_json_mode=True,
+
     )
 
+    # Format the dynamic code generation prompt
     prompt = (
-    code_assistant_instructions
-    + "\nBased on the following context, generate the code that satisfies the question:\n"
-    + "Context:\n" + combined_context
-    + "\nQuestion:\n" + state.research_topic
-    + "\nIf the question asks for a modification to previously generated code, "
-      "return the ENTIRE codebase again, with the requested modification fully integrated. "
-      "Do NOT output only the new fragment—always output the complete updated code.\n"
-    + "Here is the previously generated code:\n"
-    + state.code
+        "Context (previous code):\n" + state.code + "\n\n"
+        "User request:\n" + question + "\n"
+        "Instructions: Decide which (if any) specialized tool to use. "
+        "If none are needed, generate the code directly. Output only the code."
     )
 
-
-    # Run the code generation agent
-    code_response = code_agent.run(prompt)
+    # Let the agent autonomously decide and call any registered tool if the input fits
+    code_response = code_agent.run(tool_selection_prompt + "\n" + prompt)
     content = code_response.content
-    code = ""
 
     try:
         content = json.loads(content or "{}")
         code = content.get("code", "")
-    except json.JSONDecodeError:
-        code = "Error: Unable to parse code response."
-        
-    
+    except Exception:
+        code = str(content)
+        # fallback if not standard json
 
+    print("CODE SOLUTION:\n", code)
+    state.code = code
     return code
-    
-
-
 
 
 ## Function to generate code
@@ -854,6 +913,117 @@ def generate(state: SummaryState, config: RunnableConfig):
     
 
     
+
+# def generate_code(question: str, config: RunnableConfig, state: SummaryState):
+
+
+#     print("--- GENERATING CODE ---")
+
+#     # -------------------------
+#     # 1️⃣ Web Search for User URLs
+#     # -------------------------
+#     # Use search tools
+#     duck_tool = DuckDuckGoTools(fixed_max_results=3)
+#     google_tool = GoogleSearchTools(proxy=None)  # or proxy="http://your_proxy:port"
+#     baidusearch_tool = BaiduSearchTools(fixed_max_results=3)
+
+#     search_agent = Agent(
+#         model=Ollama(id="qwen3:latest"),
+#         tools=[google_tool],
+#         show_tool_calls=True,
+#         markdown=False
+#     )
+
+#     # Format search query
+#     search_query = code_search_instructions.format(research_topic=state.research_topic)
+#     search_response = search_agent.run(search_query)
+#     #print("RAW SEARCH RESPONSE:\n", search_response)
+
+#     # Clean up <think> tags from Deepseek/LLM responses
+#     content = search_response.content
+#     content = remove_think_tags(content)
+    
+
+#     # Parse URLs returned by the search
+#     try:
+#         data = json.loads(content or "{}")
+#         urls = data.get("urls", [])
+#     except json.JSONDecodeError:
+#         urls = []
+#     print(f"User URLs: {urls}")
+
+#     # Load content from user-specified URLs
+#     url_docs = []
+#     for url in urls:
+#         url_docs.extend(WebBaseLoader(url).load())
+#     url_context = "\n\n".join([doc.page_content for doc in url_docs])
+
+#     # -------------------------
+#     # 2️⃣ Load SNN Documentation Vectorstore
+#     # -------------------------
+#     embedding_model = SentenceTransformerEmbeddings("mchochlov/codebert-base-cd-ft")
+#     #embedding_model = SentenceTransformerEmbeddings("nomic-ai/CodeRankEmbed")
+
+#     # Load persisted vectorstore
+#     vectorstore = Chroma(
+#         embedding_function=embedding_model,
+#         collection_name="snntorch-docs",
+#         persist_directory="./chroma_snn_docs"
+#     )
+#     retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+
+#     # Retrieve relevant SNN docs
+#     snn_relevant = retriever.get_relevant_documents(state.research_topic)
+#     snn_context = "\n\n".join([doc.page_content for doc in snn_relevant])
+
+#     # -------------------------
+#     # 3️⃣ Combine contexts
+#     # -------------------------
+#     combined_context = snn_context + "\n\n" + url_context
+
+#     # -------------------------
+#     # 4️⃣ Construct prompt for code generation
+#     # -------------------------
+#     code_agent = Agent(
+#         model=Ollama(id="gpt-oss:20b"),
+#         tools=[],
+#         show_tool_calls=False,
+#         use_json_mode=True,
+#     )
+
+#     prompt = (
+#     code_assistant_instructions
+#     + "\nBased on the following context, generate the code that satisfies the question:\n"
+#     + "Context:\n" + combined_context
+#     + "\nQuestion:\n" + state.research_topic
+#     + "\nIf the question asks for a modification to previously generated code, "
+#       "return the ENTIRE codebase again, with the requested modification fully integrated. "
+#       "Do NOT output only the new fragment—always output the complete updated code.\n"
+#     + "Here is the previously generated code:\n"
+#     + state.code
+#     )
+
+
+#     # Run the code generation agent
+#     code_response = code_agent.run(prompt)
+#     content = code_response.content
+#     code = ""
+
+#     try:
+#         content = json.loads(content or "{}")
+#         code = content.get("code", "")
+#     except json.JSONDecodeError:
+#         code = "Error: Unable to parse code response."
+        
+    
+
+#     return code
+    
+
+
+
+
+
 
     # messages += [
     #     (

@@ -287,4 +287,6 @@ dependencies:
       - yarl==1.18.3
       - zipp==3.21.0
       - zstandard==0.23.0
+      - unstructured==0.18.15
+      - unstructured-client==0.42.3 
 prefix: /home/sirica/miniconda3/envs/ollama_full_research
