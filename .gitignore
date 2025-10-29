@@ -20,3 +20,4 @@ src/assistant/__pycache__/state.cpython-313.pyc
 src/assistant/__pycache__/prompts.cpython-313.pyc
 src/assistant/__pycache__/graph.cpython-313.pyc
 src/assistant/__pycache__/*
+generated_code/*

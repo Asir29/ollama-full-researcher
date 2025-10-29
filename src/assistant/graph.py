@@ -765,33 +765,60 @@ def search_relevant_sources(state: SummaryState, config: RunnableConfig):
 # ------------------ Specialized Agent: snnTorch_agent ------------------
 def snnTorch_agent(question: str, config: RunnableConfig, state: SummaryState):
     """
-    Handles queries involving SNN network design, adaptation, or explainability using snnTorch.
-    Returns code or workflow modifications as needed in JSON with "code" key.
+    Handles queries involving SNN network design using snnTorch.
+    STRICTLY uses ONLY information from the vectorstore (snnTorch documentation).
+    Returns code in JSON with 'code' key.
     """
     print("--- calling SNNTorch AGENT ---")
-
-    # Load snnTorch docs context
+    
+    # Load snnTorch docs context from vectorstore
     embedding_model = SentenceTransformerEmbeddings("mchochlov/codebert-base-cd-ft")
     vectorstore = Chroma(
         embedding_function=embedding_model,
         collection_name="snntorch-docs",
         persist_directory="./chroma_snn_docs"
     )
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
-    snn_context = "\n\n".join([doc.page_content for doc in retriever.get_relevant_documents(question)])
+    
+    # IMPROVEMENT 1: Increase retrieval from k=5 to k=10
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
+    
+    # Retrieve relevant documentation
+    relevant_docs = retriever.get_relevant_documents(question)
+    
+    # IMPROVEMENT 2: Format context with clear source attribution
+    snn_context = ""
+    for i, doc in enumerate(relevant_docs, 1):
+        snn_context += f"[Documentation Excerpt {i}]\\n{doc.page_content}\\n\\n"
+    
+    # IMPROVEMENT 3: CRITICAL - Strict grounding prompt
+    prompt = f"""You are a snnTorch code generation assistant with STRICT GROUNDING requirements.
 
-    # Construct prompt for code adaptation
-    prompt = (
-    "Given SNN context:\n" + snn_context +
-    "\nAdapt or implement the following:\n" + question +
-    "\nConstraints:\n"
-    "- Respond with a single JSON object containing one key \"code\" whose value is the raw Python code as a string.\n"
-    "- Do NOT include any Markdown formatting, triple backticks, or language tags.\n"
-    "- Do NOT add any introductory text or explanations.\n"
-    "Return ONLY the JSON object."
-)
+    CRITICAL RULES - YOU MUST FOLLOW THESE:
+    1. Use ONLY the API, classes, and functions from the documentation excerpts below
+    2. Do NOT use any knowledge from your pretraining about snnTorch
+    3. If the documentation shows an API, use it EXACTLY as shown
+    4. If you cannot find the information in the documentation, say so - do NOT guess
+    5. NEVER hallucinate function names, parameters, or APIs
+    6. If the documentation is insufficient, return an error explaining what's missing
 
+    DOCUMENTATION EXCERPTS (Your ONLY source of truth):
+    {snn_context}
 
+    USER REQUEST:
+    {question}
+
+    RESPONSE FORMAT:
+    - Respond with a single JSON object containing one key 'code'
+    - The 'code' value should be the raw Python code as a string
+    - Use ONLY APIs, classes, and syntax from the documentation above
+    - Do NOT include any Markdown formatting, backticks, or explanations
+    - If you cannot complete the task with ONLY the provided documentation, return:
+    {{"code": "ERROR: Insufficient documentation. Missing information: [specify what's needed]"}}
+
+    Return ONLY the JSON object.
+    """
+    
+    # Call LLM with strict grounding
     agent = Agent(
         model=Ollama(id="gpt-oss:20b"),
         tools=[],
@@ -799,13 +826,22 @@ def snnTorch_agent(question: str, config: RunnableConfig, state: SummaryState):
         use_json_mode=True,
     )
     response = agent.run(prompt)
-    print("SNNTorch AGENT RAW RESPONSE:\n", response.content)
+    
+    print(f"SNNTorch AGENT RAW RESPONSE:\\n{response.content}")
+    
     try:
-        content = json.loads(response.content or "{}")
+        content = json.loads(response.content) or {}
         code = content.get("code", "")
+        
+        # IMPROVEMENT 4: Validation check
+        if "ERROR:" in code:
+            print(f"WARNING: Agent reported insufficient documentation: {code}")
+        
     except json.JSONDecodeError:
         code = "Error: Unable to parse SNNTorch agent response."
+    
     return {"code": code}
+
 
 
 # ------------------ Specialized Agent: nni_agent ------------------
@@ -859,94 +895,189 @@ def nni_agent(question: str, config: RunnableConfig, state: SummaryState):
 
 # ------------------ General Code Generation Function ------------------
 def generate_code(config: RunnableConfig, state: SummaryState):
-    print("--- GENERATING COMPOSITE CODE ---")
+    """
+    Generate code using a two-phase approach:
+    1. Orchestrator decides which tools to call
+    2. Orchestrator integrates the tool outputs into a single coherent solution
+    """
+    print("---GENERATING CODE SOLUTION---")
+    print("--- PHASE 1: TOOL SELECTION AND EXECUTION ---")
+    
     question = state.research_topic
     if isinstance(question, list):
-        question_str = "\n".join(question)
+        question_str = " ".join(question)
     else:
         question_str = str(question)
-
-    # Define available tools with descriptions
+    
+    # Define available tools
     available_tools = [
         {
             "name": "snnTorch_agent",
             "function": lambda q: snnTorch_agent(q, config, state),
-            "description": "Handle SNN code design and adaptation."
+            "description": "Generates SNN model code using snnTorch library"
         },
         {
             "name": "nni_agent",
             "function": lambda q: nni_agent(q, config, state),
-            "description": "Handle NNI experiment setups and YAML configs."
+            "description": "Generates NNI experiment configuration and setup code"
         }
     ]
+    
+    # System prompt for tool selection
+    tool_selection_prompt = """You are a code generation orchestrator that decides which specialized tools to invoke.
 
-    # Prompt instructing the model to decide which tools to call, possibly both
-    system_prompt = (
-        "You are a code generation assistant that can call multiple specialized tools and then combine their outputs.\n"
-        "Your task:\n"
-        "  - Analyze the user question to determine which tools to invoke. You may invoke one or both tools.\n"
-        "  - Ask each tool only for the part of the code relevant to its domain.\n"
-        "  - Respond with a JSON object with a list of tool calls and their outputs.\n"
-        "Format:\n"
-        "  { \"tool_calls\": [\n"
-        "      { \"name\": \"snnTorch_agent\", \"query\": \"<question part for SNN>\" },\n"
-        "      { \"name\": \"nni_agent\", \"query\": \"<question part for NNI>\" }\n"
-        "    ],\n"
-        "    \"outputs\": {\n"
-        "      \"snn_code\": \"<code from snnTorch_agent>\",\n"
-        "      \"nni_code\": \"<code from nni_agent>\"\n"
-        "    }\n"
-        "  }\n"
-        "If a tool is not needed, it should not appear in the list.\n"
-        "Provide the entire response as a JSON object without extra text."
-    )
+    Your task:
+    - Analyze the user request to determine which tools are needed
+    - For each tool, provide a specific query that asks for the relevant code component
+    - Respond with ONLY a JSON object containing tool calls
 
+    Available tools:
+    1. snnTorch_agent: Generates SNN model architecture and training code
+    2. nni_agent: Generates NNI hyperparameter tuning configuration
+
+    Format:
+    {
+    "tool_calls": [
+        {"name": "snnTorch_agent", "query": "specific question for SNN code"},
+        {"name": "nni_agent", "query": "specific question for NNI setup"}
+    ]
+    }
+
+    Rules:
+    - Only include tools that are needed
+    - Each query should be focused and specific
+    - Do NOT generate code yourself - just decide which tools to call
+    - Output ONLY valid JSON
+    """
+    
     prompt = (
-        f"Context (previous code):\n{state.code}\n\n"
-        f"User request:\n{question_str}\n\n"
-        f"Instructions: {system_prompt}"
+        f"Context (previous code):\\n{state.code}\\n\\n"
+        f"User request:\\n{question_str}\\n\\n"
+        f"Instructions: {tool_selection_prompt}"
     )
-
-    # Call the model to decide on tools and collect their outputs
+    
+    # Get tool selection from orchestrator
     response = Agent(
         model=Ollama(id="gpt-oss:20b"),
         tools=[],
         show_tool_calls=True,
         use_json_mode=True,
     ).run(prompt)
-
-    print("GENERATE CODE MODEL RESPONSE:\n", response.content)
     
-    # Parse the JSON response
+    print("ORCHESTRATOR SPECIALIZED AGENTS SELECTION:\\n", response.content)
+    
+    # Parse and execute tool calls
     try:
         response_data = json.loads(response.content)
         tool_calls = response_data.get("tool_calls", [])
-        outputs = response_data.get("outputs", {})
-    except Exception:
-        print("Failed to parse model response")
+        
+        if not tool_calls:
+            print("WARNING: No tool calls found")
+            return "Error: No tools were selected"
+            
+        print(f"Tools selected: {[call['name'] for call in tool_calls]}")
+        
+    except json.JSONDecodeError as e:
+        print(f"Failed to parse orchestrator response: {e}")
         return "Error in response parsing"
-
-    # Call specialized tools based on model instruction
-    code_parts = []
-
+    
+    # Execute tools and collect outputs
+    tool_outputs = {}
+    
     for call in tool_calls:
-        tool_name = call["name"]
-        query = call["query"]
+        tool_name = call.get("name")
+        query = call.get("query")
+        
+        if not tool_name or not query:
+            print(f"WARNING: Skipping invalid tool call: {call}")
+            continue
+        
+        print(f"\\nExecuting tool: {tool_name}")
+        print(f"Query: {query}")
+        
+        # Find and execute the tool
         for tool in available_tools:
             if tool["name"] == tool_name:
-                result = tool["function"](query)
-                code_parts.append(result.get("code", ""))
+                try:
+                    result = tool["function"](query)
+                    
+                    # Extract code from result
+                    if isinstance(result, dict):
+                        code = result.get("code", "")
+                    elif isinstance(result, str):
+                        code = result
+                    else:
+                        code = str(result)
+                    
+                    if code and code != "Error":
+                        tool_outputs[tool_name] = code
+                        print(f"✓ Collected {len(code)} chars from {tool_name}")
+                    else:
+                        print(f"✗ Tool {tool_name} returned empty/error")
+                        
+                except Exception as e:
+                    print(f"✗ Error executing {tool_name}: {e}")
+                    
                 break
     
-    # Combine code parts into a single cohesive code
-    combined_code = "\n\n".join(code_parts)
+    if not tool_outputs:
+        print("ERROR: No code was generated from any tool")
+        return "Error: No code generated from tools"
     
-    # Optionally, ask the model to merge or improve the combined code (could be an extra step)
+    print(f"\\n--- PHASE 2: CODE INTEGRATION ---")
+    print(f"Integrating {len(tool_outputs)} code components...")
+    
+    # INTEGRATION STEP: Have orchestrator combine the code
+    integration_prompt = f"""You are a code integration expert. You have received code from multiple specialized agents.
 
-    print("Final combined code:\n", combined_code)
-    # Save and return the combined code
-    state.code = combined_code
-    return combined_code
+    Your task:
+    - Analyze all the code components provided
+    - Create a SINGLE, COHERENT, INTEGRATED code solution
+    - Ensure proper imports, no duplicates, correct dependencies
+    - Make sure all components work together seamlessly
+    - Add necessary glue code to connect the components
+
+    User's original request:
+    {question_str}
+
+    Code components received:
+    """
+    
+    # Add each tool output to the prompt
+    for tool_name, code in tool_outputs.items():
+        integration_prompt += f"\\n\\n=== Code from {tool_name} ===\\n{code}\\n"
+    
+    integration_prompt += """
+
+    Requirements for integration:
+    1. Consolidate all imports at the top
+    2. Remove any duplicate code
+    3. Ensure the NNI configuration references the correct model class
+    4. Add comments explaining how components connect
+    5. Create a coherent file structure (separate files if needed, clearly marked)
+    6. Make sure the code is ready to run
+
+    Output ONLY the integrated code solution. Use clear section markers if multiple files are needed.
+    """
+    
+    # Call orchestrator for integration
+    integration_response = Agent(
+        model=Ollama(id="gpt-oss:20b"),
+        tools=[],
+        show_tool_calls=False,
+    ).run(integration_prompt)
+    
+    integrated_code = integration_response.content
+    
+    print(f"✓ Integration complete")
+    print(f"Final code length: {len(integrated_code)} characters")
+    
+    # Save to state
+    state.code = integrated_code
+    
+    return integrated_code
+
+
 
 
 
