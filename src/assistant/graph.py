@@ -13,6 +13,8 @@ import numpy as np              # Numeric arrays and operations
 import torch                    # PyTorch (GPU/CPU tensors, deep learning)
 torch.cuda.empty_cache()        # Clear CUDA memory if needed
 import os
+from datetime import datetime
+
 
 # -------------------------
 # Type Annotations & Data Models
@@ -179,7 +181,26 @@ def remove_think_tags(text: str) -> str:
         cleaned_text = cleaned_text[:start] + cleaned_text[end:]
     return cleaned_text
 
+def save_code_to_file(code_str: str, output_dir: str, filename: str, mode="w"):
+    """
+    Saves code string to a file inside output_dir.
+    Creates output_dir if it doesn't exist.
 
+    Args:
+        code_str (str): The code to save.
+        output_dir (str): Directory path to save the code in.
+        filename (str): The filename for the code file.
+        mode (str): File write mode: "w" for overwrite, "a" for append.
+
+    Returns:
+        None
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    file_path = os.path.join(output_dir, filename)
+    with open(file_path, mode, encoding="utf-8") as f:
+        f.write(code_str)
+        if mode == "a":
+            f.write("\n\n# --- Appended code snippet ---\n\n")
 
 
 
@@ -209,7 +230,7 @@ logger = logging.getLogger(__name__)
 async def route_question(state: SummaryState, config: RunnableConfig):
     """ Route question to the appropriate node """
 
-    print(f"Current state: {state}")
+    #print(f"Current state: {state}")
 
     await copilotkit_emit_message(config, json.dumps({
         "node": "Routing Question",
@@ -671,87 +692,6 @@ class SentenceTransformerEmbeddings(Embeddings):
         return self.model.encode([text])[0].tolist()
 
 
-# SNN Network Adaptation Agent
-def snnTorch_agent(question: str, config: RunnableConfig, state: SummaryState):
-    """
-    Handles queries involving SNN network design, adaptation, or explainability using snnTorch.
-    Returns code or workflow modifications as needed.
-    """
-    print("--- SNNTorch AGENT ---")
-    # (A) Load snnTorch docs context (same as your main routine, use snnTorch paths/config)
-    embedding_model = SentenceTransformerEmbeddings("mchochlov/codebert-base-cd-ft")
-    vectorstore = Chroma(
-        embedding_function=embedding_model,
-        collection_name="snntorch-docs",
-        persist_directory="./chroma_snn_docs"
-    )
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
-    snn_context = "\n\n".join([doc.page_content for doc in retriever.get_relevant_documents(question)])
-
-    # (B) Construct prompt for code adaptation
-    prompt = (
-        "Given SNN context:\n" + snn_context +
-        "\nAdapt or implement the following:\n" + question +
-        "\nUse snnTorch conventions and maintain modular code."
-    )
-
-    agent = Agent(
-        model=Ollama(id="gpt-oss:20b"),
-        tools=[],
-        show_tool_calls=False,
-        use_json_mode=True,
-    )
-    response = agent.run(prompt)
-    try:
-        content = json.loads(response.content or "{}")
-        code = content.get("code", "")
-    except json.JSONDecodeError:
-        code = "Error: Unable to parse SNNTorch agent response."
-    return code
-
-
-# NNI Experiment Adaptation Agent
-def nni_agent(question: str, config: RunnableConfig, state: SummaryState):
-    """
-    Handles queries for NNI experiment setup, tuning, adaptation, or config generation.
-    Returns YAML config/code for NNI usage.
-    """
-    print("--- NNI AGENT ---")
-    # (A) Load NNI docs/context if needed (adapt path as required)
-    embedding_model = SentenceTransformerEmbeddings("mchochlov/codebert-base-cd-ft")
-    vectorstore = Chroma(
-        embedding_function=embedding_model,
-        collection_name="nni-docs",
-        persist_directory="./chroma_nni_docs"
-    )
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
-    nni_context = "\n\n".join([doc.page_content for doc in retriever.get_relevant_documents(question)])
-
-    # (B) Construct NNI experiment adaptation prompt
-    prompt = (
-        "Given NNI context:\n" + nni_context +
-        "\nAdapt or implement the following NNI experiment/code request:\n" + question +
-        "\nOutput valid NNI YAML config and pipeline code."
-    )
-
-    agent = Agent(
-        model=Ollama(id="gpt-oss:20b"),
-        tools=[],
-        show_tool_calls=False,
-        use_json_mode=True,
-    )
-    response = agent.run(prompt)
-    try:
-        content = json.loads(response.content or "{}")
-        code = content.get("code", "")
-    except json.JSONDecodeError:
-        code = "Error: Unable to parse NNI agent response."
-    return code
-
-
-
-
-
 def search_relevant_sources(state: SummaryState, config: RunnableConfig):
     """
     Creation of vectorstore from docs of interest.
@@ -822,66 +762,193 @@ def search_relevant_sources(state: SummaryState, config: RunnableConfig):
     return {"status": "vectorstore_created"}
 
 
+# ------------------ Specialized Agent: snnTorch_agent ------------------
+def snnTorch_agent(question: str, config: RunnableConfig, state: SummaryState):
+    """
+    Handles queries involving SNN network design, adaptation, or explainability using snnTorch.
+    Returns code or workflow modifications as needed in JSON with "code" key.
+    """
+    print("--- calling SNNTorch AGENT ---")
 
-def generate_code(question: str, config: RunnableConfig, state: SummaryState):
-    print("--- GENERATING CODE ---")
+    # Load snnTorch docs context
+    embedding_model = SentenceTransformerEmbeddings("mchochlov/codebert-base-cd-ft")
+    vectorstore = Chroma(
+        embedding_function=embedding_model,
+        collection_name="snntorch-docs",
+        persist_directory="./chroma_snn_docs"
+    )
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+    snn_context = "\n\n".join([doc.page_content for doc in retriever.get_relevant_documents(question)])
 
-    # Register tool functions as callables with schema descriptions for agent
+    # Construct prompt for code adaptation
+    prompt = (
+    "Given SNN context:\n" + snn_context +
+    "\nAdapt or implement the following:\n" + question +
+    "\nConstraints:\n"
+    "- Respond with a single JSON object containing one key \"code\" whose value is the raw Python code as a string.\n"
+    "- Do NOT include any Markdown formatting, triple backticks, or language tags.\n"
+    "- Do NOT add any introductory text or explanations.\n"
+    "Return ONLY the JSON object."
+)
+
+
+    agent = Agent(
+        model=Ollama(id="gpt-oss:20b"),
+        tools=[],
+        show_tool_calls=False,
+        use_json_mode=True,
+    )
+    response = agent.run(prompt)
+    print("SNNTorch AGENT RAW RESPONSE:\n", response.content)
+    try:
+        content = json.loads(response.content or "{}")
+        code = content.get("code", "")
+    except json.JSONDecodeError:
+        code = "Error: Unable to parse SNNTorch agent response."
+    return {"code": code}
+
+
+# ------------------ Specialized Agent: nni_agent ------------------
+def nni_agent(question: str, config: RunnableConfig, state: SummaryState):
+    """
+    Handles queries for NNI experiment setup, tuning, adaptation, or config generation.
+    Returns YAML config/code for NNI usage in JSON with "code" key.
+    """
+    print("--- calling NNI AGENT ---")
+
+    # Load NNI docs/context
+    embedding_model = SentenceTransformerEmbeddings("mchochlov/codebert-base-cd-ft")
+    vectorstore = Chroma(
+        embedding_function=embedding_model,
+        collection_name="nni-docs",
+        persist_directory="./chroma_nni_docs"
+    )
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+    nni_context = "\n\n".join([doc.page_content for doc in retriever.get_relevant_documents(question)])
+
+    # Construct NNI experiment adaptation prompt
+    prompt = (
+    "Given NNI context:\n" + nni_context +
+    "\nAdapt or implement the following NNI experiment/code request:\n" + question +
+    "\nConstraints:\n"
+    "- Respond with a single JSON object containing two keys:\n"
+    "  'config': a JSON object for the experiment configuration (not YAML),\n"
+    "  'code': a string containing raw Python helper code.\n"
+    "- Do NOT include any Markdown formatting, triple backticks, or language tags.\n"
+    "- Do NOT add any introductory text or explanations.\n"
+    "Return ONLY the JSON object."
+)
+
+
+    agent = Agent(
+        model=Ollama(id="gpt-oss:20b"),
+        tools=[],
+        show_tool_calls=False,
+        use_json_mode=True,
+    )
+    response = agent.run(prompt)
+    print("NNI AGENT RAW RESPONSE:\n", response.content)
+    try:
+        content = json.loads(response.content or "{}")
+        code = content.get("code", "")
+        
+    except json.JSONDecodeError:
+        code = "Error: Unable to parse NNI agent response."
+    return {"code": code}
+
+
+# ------------------ General Code Generation Function ------------------
+def generate_code(config: RunnableConfig, state: SummaryState):
+    print("--- GENERATING COMPOSITE CODE ---")
+    question = state.research_topic
+    if isinstance(question, list):
+        question_str = "\n".join(question)
+    else:
+        question_str = str(question)
+
+    # Define available tools with descriptions
     available_tools = [
         {
             "name": "snnTorch_agent",
             "function": lambda q: snnTorch_agent(q, config, state),
-            "description": "Adapt, design, or modify Spiking Neural Network (SNN) code using snnTorch, given datasets or requirements."
+            "description": "Handle SNN code design and adaptation."
         },
         {
             "name": "nni_agent",
             "function": lambda q: nni_agent(q, config, state),
-            "description": "Design, adapt, or tune a Neural Network Intelligence (NNI) experiment, including YAML configs or hyperparameter search, given problem specs."
+            "description": "Handle NNI experiment setups and YAML configs."
         }
     ]
 
-    # Agent system prompt: Instruct the LLM when and why to call each tool
-    tool_selection_prompt = (
-        "You are a code generation agent able to use the following specialized tools:\n"
-        "- snnTorch_agent: For any code modifications, designs, or adaptations involving Spiking Neural Networks (SNNs) or snnTorch.\n"
-        "- nni_agent: For any experiment configuration, tuning, or automation involving NNI (Neural Network Intelligence).\n"
-        "For each input query, decide if any tool should be used. Only call a tool if the request is related to its specialization. "
-        "Otherwise, generate the code directly.\n"
-        "Always return the complete code needed, integrating tool outputs when relevant. "
-        "You are given access to previous code as context."
+    # Prompt instructing the model to decide which tools to call, possibly both
+    system_prompt = (
+        "You are a code generation assistant that can call multiple specialized tools and then combine their outputs.\n"
+        "Your task:\n"
+        "  - Analyze the user question to determine which tools to invoke. You may invoke one or both tools.\n"
+        "  - Ask each tool only for the part of the code relevant to its domain.\n"
+        "  - Respond with a JSON object with a list of tool calls and their outputs.\n"
+        "Format:\n"
+        "  { \"tool_calls\": [\n"
+        "      { \"name\": \"snnTorch_agent\", \"query\": \"<question part for SNN>\" },\n"
+        "      { \"name\": \"nni_agent\", \"query\": \"<question part for NNI>\" }\n"
+        "    ],\n"
+        "    \"outputs\": {\n"
+        "      \"snn_code\": \"<code from snnTorch_agent>\",\n"
+        "      \"nni_code\": \"<code from nni_agent>\"\n"
+        "    }\n"
+        "  }\n"
+        "If a tool is not needed, it should not appear in the list.\n"
+        "Provide the entire response as a JSON object without extra text."
     )
 
-    # Construct agent with tool selection ability
-    code_agent = Agent(
+    prompt = (
+        f"Context (previous code):\n{state.code}\n\n"
+        f"User request:\n{question_str}\n\n"
+        f"Instructions: {system_prompt}"
+    )
+
+    # Call the model to decide on tools and collect their outputs
+    response = Agent(
         model=Ollama(id="gpt-oss:20b"),
-        tools=[(tool["function"], tool["name"], tool["description"]) for tool in available_tools],
+        tools=[],
         show_tool_calls=True,
         use_json_mode=True,
+    ).run(prompt)
 
-    )
-
-    # Format the dynamic code generation prompt
-    prompt = (
-        "Context (previous code):\n" + state.code + "\n\n"
-        "User request:\n" + question + "\n"
-        "Instructions: Decide which (if any) specialized tool to use. "
-        "If none are needed, generate the code directly. Output only the code."
-    )
-
-    # Let the agent autonomously decide and call any registered tool if the input fits
-    code_response = code_agent.run(tool_selection_prompt + "\n" + prompt)
-    content = code_response.content
-
+    print("GENERATE CODE MODEL RESPONSE:\n", response.content)
+    
+    # Parse the JSON response
     try:
-        content = json.loads(content or "{}")
-        code = content.get("code", "")
+        response_data = json.loads(response.content)
+        tool_calls = response_data.get("tool_calls", [])
+        outputs = response_data.get("outputs", {})
     except Exception:
-        code = str(content)
-        # fallback if not standard json
+        print("Failed to parse model response")
+        return "Error in response parsing"
 
-    print("CODE SOLUTION:\n", code)
-    state.code = code
-    return code
+    # Call specialized tools based on model instruction
+    code_parts = []
+
+    for call in tool_calls:
+        tool_name = call["name"]
+        query = call["query"]
+        for tool in available_tools:
+            if tool["name"] == tool_name:
+                result = tool["function"](query)
+                code_parts.append(result.get("code", ""))
+                break
+    
+    # Combine code parts into a single cohesive code
+    combined_code = "\n\n".join(code_parts)
+    
+    # Optionally, ask the model to merge or improve the combined code (could be an extra step)
+
+    print("Final combined code:\n", combined_code)
+    # Save and return the combined code
+    state.code = combined_code
+    return combined_code
+
+
 
 
 ## Function to generate code
@@ -904,7 +971,17 @@ def generate(state: SummaryState, config: RunnableConfig):
     iterations = state.code_iterations
 
     # Solution
-    code = generate_code(messages, config, state)
+    code = generate_code(config, state)
+
+    output_directory = "./generated_code"
+    #output_filename = "latest_generated_code.py"  
+
+    # Construct unique filename using timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_filename = f"generated_code_{timestamp}.py"
+
+    # To overwrite the file each time:
+    save_code_to_file(code, output_directory, output_filename, mode="w")
 
     state.code = code
     #state.fixed_code = code # save for later sandboxing
@@ -1140,6 +1217,8 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
             sandbox_execution.commands.run("pip install Pillow", timeout=0)
         elif pkg in ["torchvision"]:
             sandbox_execution.commands.run("pip install --no-deps --only-binary=:all: torchvision", timeout=0)
+        elif pkg in ["os"]:
+            print("Skipping installation of built-in package 'os'")
         else:
             result = sandbox_execution.commands.run(f"pip install {pkg}", timeout=0)
             print(result.stdout or result.stderr)
