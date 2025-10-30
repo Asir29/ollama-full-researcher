@@ -847,35 +847,70 @@ def snnTorch_agent(question: str, config: RunnableConfig, state: SummaryState):
 # ------------------ Specialized Agent: nni_agent ------------------
 def nni_agent(question: str, config: RunnableConfig, state: SummaryState):
     """
-    Handles queries for NNI experiment setup, tuning, adaptation, or config generation.
-    Returns YAML config/code for NNI usage in JSON with "code" key.
+    Generates NNI experiment configuration using STRICT GROUNDING.
+    Uses ONLY Python ExperimentConfig API (NOT YAML).
+    Reference: nni_main.py and main_neubrauer.py from professor's code.
     """
-    print("--- calling NNI AGENT ---")
-
-    # Load NNI docs/context
+    print("--- calling NNI AGENT (STRICT GROUNDING - PYTHON ONLY) ---")
+    
+    # Load reference files
     embedding_model = SentenceTransformerEmbeddings("mchochlov/codebert-base-cd-ft")
     vectorstore = Chroma(
         embedding_function=embedding_model,
         collection_name="nni-docs",
         persist_directory="./chroma_nni_docs"
     )
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
-    nni_context = "\n\n".join([doc.page_content for doc in retriever.get_relevant_documents(question)])
+    
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
+    relevant_docs = retriever.get_relevant_documents(question)
+    
+    nni_context = ""
+    for i, doc in enumerate(relevant_docs, 1):
+        nni_context += f"[Reference File Excerpt {i}]\n{doc.page_content}\n\n"
+    
+    # ⭐ STRICT GROUNDING PROMPT
+    prompt = f"""You are an NNI configuration code generator with STRICT GROUNDING.
 
-    # Construct NNI experiment adaptation prompt
-    prompt = (
-    "Given NNI context:\n" + nni_context +
-    "\nAdapt or implement the following NNI experiment/code request:\n" + question +
-    "\nConstraints:\n"
-    "- Respond with a single JSON object containing two keys:\n"
-    "  'config': a JSON object for the experiment configuration (not YAML),\n"
-    "  'code': a string containing raw Python helper code.\n"
-    "- Do NOT include any Markdown formatting, triple backticks, or language tags.\n"
-    "- Do NOT add any introductory text or explanations.\n"
-    "Return ONLY the JSON object."
-)
+⚠️ CRITICAL RULES:
+1. Use ONLY patterns from the reference files below
+2. Do NOT generate YAML files - use PYTHON ExperimentConfig() API
+3. Do NOT use any pretraining knowledge about NNI
+4. Copy EXACTLY the imports, function names, and parameter patterns from reference files
+5. For reporting metrics, use DICT format: {{"default": metric, "other_key": value}}
+6. If pattern not found in reference files, return ERROR
 
+REFERENCE FILES (Your ONLY source):
+{nni_context}
 
+USER REQUEST:
+{question}
+
+REQUIRED OUTPUT:
+Generate Python code that:
+- Imports from nni.experiment: ExperimentConfig, Experiment, AlgorithmConfig, LocalConfig
+- Defines search_space as Python dict with {{'_type': '...', '_value': [...]}}
+- Creates ExperimentConfig with proper parameters
+- Uses AlgorithmConfig for tuner/assessor
+- Uses LocalConfig for training service
+- Calls experiment.run(port)
+
+OR for training script:
+- Calls nni.get_next_parameter()
+- Uses nni.report_intermediate_result(dict)
+- Uses nni.report_final_result(dict)
+
+FORMAT:
+Return JSON: {{"code": "full python code here"}}
+
+CONSTRAINTS:
+- Copy patterns EXACTLY from reference files
+- NO YAML format
+- NO hallucinations
+- If cannot find pattern: {{"code": "ERROR: Missing reference pattern for: [what's missing]"}}
+
+Return ONLY the JSON object.
+"""
+    
     agent = Agent(
         model=Ollama(id="gpt-oss:20b"),
         tools=[],
@@ -883,13 +918,19 @@ def nni_agent(question: str, config: RunnableConfig, state: SummaryState):
         use_json_mode=True,
     )
     response = agent.run(prompt)
-    print("NNI AGENT RAW RESPONSE:\n", response.content)
+    
+    print(f"NNI AGENT RESPONSE:\n{response.content}")
+    
     try:
         content = json.loads(response.content or "{}")
         code = content.get("code", "")
         
-    except json.JSONDecodeError:
-        code = "Error: Unable to parse NNI agent response."
+        if "ERROR:" in code:
+            print(f"⚠️ WARNING: {code}")
+        
+    except json.JSONDecodeError as e:
+        code = f"Error: Parse failure: {e}"
+    
     return {"code": code}
 
 
