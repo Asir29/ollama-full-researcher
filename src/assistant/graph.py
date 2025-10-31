@@ -337,52 +337,6 @@ async def web_research(state: SummaryState, config: RunnableConfig):
     return {"raw_search_result": content}
 
 
-async def summarize_sources(state: SummaryState, config: RunnableConfig):
-    """ Summarize the gathered sources """
-    
-    await copilotkit_emit_message(config, json.dumps({
-        "node": "Summarize Sources",
-        "content": "Summarizing gathered information..."
-    }))
-    
-    # Existing summary
-    existing_summary = state.running_summary
-
-    # Most recent web research
-    most_recent_web_research = state.web_research_results[-1]
-
-    # Build the human message
-    if existing_summary:
-        human_message_content = (
-            f"Extend the existing summary: {existing_summary}\n\n"
-            f"Include new search results: {most_recent_web_research} "
-            f"That addresses the following topic: {state.research_topic}"
-        )
-    else:
-        human_message_content = (
-            f"Generate a summary of these search results: {most_recent_web_research} "
-            f"That addresses the following topic: {state.research_topic}"
-        )
-
-    # Run the LLM
-    configurable = Configuration.from_runnable_config(config)
-    llm = ChatOllama(model=configurable.local_llm, temperature=0)
-    result = await llm.ainvoke(
-        [SystemMessage(content=summarizer_instructions),
-        HumanMessage(content=human_message_content)]
-    )
-
-    running_summary = result.content
-
-    
-    running_summary = remove_think_tags(running_summary)
-
-    await copilotkit_emit_message(config, json.dumps({
-        "node": "Summarize Sources",
-        "content": running_summary
-    }))
-    return {"running_summary": running_summary}
-
 
 
 
@@ -709,7 +663,7 @@ def search_relevant_sources(state: SummaryState, config: RunnableConfig):
     # 1️⃣ Crawl SNN docs
     loader = RecursiveUrlLoader(
         url="https://snntorch.readthedocs.io/en/latest/",
-        max_depth=3,
+        max_depth=7,
         extractor=lambda x: BeautifulSoup(x, "html.parser").get_text()
     )
     snn_docs = loader.load()
@@ -738,6 +692,26 @@ def search_relevant_sources(state: SummaryState, config: RunnableConfig):
     print("---CREATING NNI VECTORSTORE---")
     # Loader for all documents in the local directory `esempi_NNI`
 
+    nni_api_ref_doc = Document(
+    page_content="""# NNI API REFERENCE
+
+    AlgorithmConfig(name="Anneal", class_args={"optimize_mode": "maximize"})
+    AlgorithmConfig(name="Medianstop", class_args={"optimize_mode": "maximize", "start_step": 10})
+
+    LocalConfig(trial_gpu_number=args.exp_gpu_number, max_trial_number_per_gpu=args.max_per_gpu, use_active_gpu=True)
+
+    ExperimentConfig MUST have:
+    - experiment_working_directory
+    - tuner_gpu_indices
+    - max_experiment_duration (NOT max_wall_time)
+    - training_service=LocalConfig(...)
+
+    experiment.run(args.port)
+    """,
+        metadata={"source": "NNI_API_REFERENCE", "priority": "HIGHEST"}
+    )
+
+
     # Load with optional file extension filtering (e.g., ".md", ".txt", ".html", ".pdf")
     directory_loader = DirectoryLoader(
         path="esempi_NNI",                  # <--- your local NNI docs directory
@@ -746,6 +720,9 @@ def search_relevant_sources(state: SummaryState, config: RunnableConfig):
     )
     nni_docs = directory_loader.load()
     print(f"Loaded {len(nni_docs)} NNI docs from directory")
+
+    nni_docs.insert(0, nni_api_ref_doc)
+
 
     # Split NNI docs just like above
     nni_doc_splits = load_and_split(nni_docs, chunk_size=512, overlap=50)
@@ -779,8 +756,8 @@ def snnTorch_agent(question: str, config: RunnableConfig, state: SummaryState):
         persist_directory="./chroma_snn_docs"
     )
     
-    # IMPROVEMENT 1: Increase retrieval from k=5 to k=10
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
+    
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 30})
     
     # Retrieve relevant documentation
     relevant_docs = retriever.get_relevant_documents(question)
@@ -851,8 +828,9 @@ def nni_agent(question: str, config: RunnableConfig, state: SummaryState):
     Uses ONLY Python ExperimentConfig API (NOT YAML).
     Reference: nni_main.py and main_neubrauer.py from professor's code.
     """
+
     print("--- calling NNI AGENT (STRICT GROUNDING - PYTHON ONLY) ---")
-    
+
     # Load reference files
     embedding_model = SentenceTransformerEmbeddings("mchochlov/codebert-base-cd-ft")
     vectorstore = Chroma(
@@ -860,78 +838,175 @@ def nni_agent(question: str, config: RunnableConfig, state: SummaryState):
         collection_name="nni-docs",
         persist_directory="./chroma_nni_docs"
     )
-    
+
     retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
     relevant_docs = retriever.get_relevant_documents(question)
-    
+
     nni_context = ""
     for i, doc in enumerate(relevant_docs, 1):
         nni_context += f"[Reference File Excerpt {i}]\n{doc.page_content}\n\n"
+
+    # ⭐ PRODUCTION-GRADE PROMPT FOR NNI CONFIGURATION
     
-    # ⭐ STRICT GROUNDING PROMPT
-    prompt = f"""You are an NNI configuration code generator with STRICT GROUNDING.
+    prompt = f"""You are an NNI experiment configuration generator that produces code following the EXACT PATTERN of professional NNI experiment setups.
 
-⚠️ CRITICAL RULES:
-1. Use ONLY patterns from the reference files below
-2. Do NOT generate YAML files - use PYTHON ExperimentConfig() API
-3. Do NOT use any pretraining knowledge about NNI
-4. Copy EXACTLY the imports, function names, and parameter patterns from reference files
-5. For reporting metrics, use DICT format: {{"default": metric, "other_key": value}}
-6. If pattern not found in reference files, return ERROR
+    Your task: Generate a complete, production-style NNI experiment configuration script in Python.
 
-REFERENCE FILES (Your ONLY source):
-{nni_context}
+    =============================================================================
+    CORE REQUIREMENTS (Non-negotiable)
+    =============================================================================
 
-USER REQUEST:
-{question}
+    1. OUTPUT STRUCTURE
+    Generate a SINGLE Python script containing:
+    - Search space definition (dict with _type and _value keys)
+    - Search space export to JSON file
+    - argparse configuration with command-line arguments
+    - ExperimentConfig setup
+    - Experiment initialization and lifecycle management
 
-REQUIRED OUTPUT:
-Generate Python code that:
-- Imports from nni.experiment: ExperimentConfig, Experiment, AlgorithmConfig, LocalConfig
-- Defines search_space as Python dict with {{'_type': '...', '_value': [...]}}
-- Creates ExperimentConfig with proper parameters
-- Uses AlgorithmConfig for tuner/assessor
-- Uses LocalConfig for training service
-- Calls experiment.run(port)
+    2. SEARCH SPACE (8+ hyperparameters minimum)
+    - Define as Python dict with this structure:
+        {{"param_name": {{"_type": "choice", "_value": [...]}}}}
+    - Include BOTH discrete (choice) and continuous (quniform) parameters
+    - Each parameter should be meaningful to the network architecture
+    - Add brief comments explaining each parameter's role
 
-OR for training script:
-- Calls nni.get_next_parameter()
-- Uses nni.report_intermediate_result(dict)
-- Uses nni.report_final_result(dict)
+    3. SEARCH SPACE EXPORT
+    - Export to JSON file in ./searchspaces/ directory
+    - Pattern: "./searchspaces/{{experiment_name}}_searchspace.json"
+    - Use: json.dump(search_space, file)
 
-FORMAT:
-Return JSON: {{"code": "full python code here"}}
+    4. ARGPARSE CONFIGURATION (Minimum 6+ arguments)
+    Required arguments:
+    - exp_name: experiment name with sensible default
+    - exp_trials: max number of trials (default: 10000)
+    - exp_time: max duration in format "100d" (default: "100d")
+    - exp_gpu_number: number of GPUs (default: 2)
+    - max_per_gpu: trials per GPU (default: 5)
+    - port: service port (default: 8081)
+    - script: path to training script (configurable)
 
-CONSTRAINTS:
-- Copy patterns EXACTLY from reference files
-- NO YAML format
-- NO hallucinations
-- If cannot find pattern: {{"code": "ERROR: Missing reference pattern for: [what's missing]"}}
+    5. EXPERIMENT CONFIG (Using ExperimentConfig API)
+    Must include:
+    - experiment_name = args.exp_name
+    - search_space = search_space
+    - tuner = AlgorithmConfig(name="Anneal", class_args={{"optimize_mode": "maximize"}})
+    - assessor = AlgorithmConfig(name="Medianstop", class_args={{"optimize_mode": "maximize", "start_step": 10}})
+    - trial_command = f"python3 {{args.script}}"
+    - trial_code_directory = "./"
+    - max_trial_number = args.exp_trials
+    - max_experiment_duration = args.exp_time
+    - trial_concurrency = 1
+    - training_service = LocalConfig(...)
 
-Return ONLY the JSON object.
-"""
-    
+    6. TRAINING SERVICE (LocalConfig)
+    training_service=LocalConfig(
+        trial_gpu_number=args.exp_gpu_number,
+        max_trial_number_per_gpu=args.max_per_gpu,
+        use_active_gpu=True
+    )
+
+    7. EXPERIMENT LIFECYCLE
+    - Create Experiment object: experiment = Experiment(config)
+    - Run: experiment.run(args.port)
+    - Include user input: input('Press any key to stop...')
+    - Stop gracefully: experiment.stop()
+
+    8. IMPORTS
+    Required imports:
+    import argparse
+    import json
+    import os
+    from nni.experiment import Experiment, ExperimentConfig, AlgorithmConfig, LocalConfig
+
+    9. CODE ORGANIZATION
+    - Single unified script (no fragmentation)
+    - Search space at top (after imports)
+    - Export searchspace to file immediately after definition
+    - if __name__ == '__main__': block for argparse and config setup
+    - Brief comments explaining critical sections
+
+    =============================================================================
+    ARCHITECTURAL FLEXIBILITY
+    =============================================================================
+
+    FOR SNNS (Spiking Neural Networks):
+    - Include population parameters: neurons_per_pop, output_pop, nb_hidden
+    - Include synaptic parameters: alpha_*, beta_*
+    - Include slope parameter
+    - Use quniform for continuous dynamics
+
+    FOR STANDARD NEURAL NETWORKS:
+    - Include architecture: n_layers, hidden_size
+    - Include learning: lr, momentum
+    - Include regularization: dropout, weight_decay
+
+    FOR CONVOLUTIONAL NETWORKS:
+    - Include filters, kernel_size, pool_size
+    - Include learning and regularization
+
+    =============================================================================
+    WHAT NOT TO DO
+    =============================================================================
+
+    ❌ Do NOT generate 3 separate files (model, train, experiment)
+    ❌ Do NOT hardcode values - make them argparse arguments
+    ❌ Do NOT use YAML format
+    ❌ Do NOT use AlgorithmConfig with wrong parameter names
+    ❌ Do NOT forget search space export to JSON
+    ❌ Do NOT skip the argparse configuration
+    ❌ Do NOT forget use_active_gpu=True in LocalConfig
+    ❌ Do NOT use experiment.run(config) - use experiment.run(args.port)
+    ❌ Do NOT add fewer than 8 hyperparameters
+    ❌ Do NOT forget the input() + stop() lifecycle management
+
+    =============================================================================
+    RETURN FORMAT
+    =============================================================================
+
+    Return a JSON object:
+    {{
+    "code": "Full Python script as a string here",
+    "summary": "Brief explanation of configuration choices"
+    }}
+
+    The code must be complete, syntactically valid Python that can be executed immediately.
+
+    =============================================================================
+
+    REFERENCE FILES (Ground Truth):
+    {nni_context}
+
+    USER REQUEST:
+    {question}
+
+    Now generate the NNI configuration following ALL the requirements above.
+    """
+
     agent = Agent(
         model=Ollama(id="gpt-oss:20b"),
         tools=[],
         show_tool_calls=False,
         use_json_mode=True,
     )
+
     response = agent.run(prompt)
-    
+
     print(f"NNI AGENT RESPONSE:\n{response.content}")
-    
+
     try:
         content = json.loads(response.content or "{}")
         code = content.get("code", "")
-        
+
         if "ERROR:" in code:
             print(f"⚠️ WARNING: {code}")
-        
+
     except json.JSONDecodeError as e:
         code = f"Error: Parse failure: {e}"
-    
+
     return {"code": code}
+
+
 
 
 # ------------------ General Code Generation Function ------------------
@@ -1531,8 +1606,7 @@ def collect_feedback(state: SummaryState, config: RunnableConfig):
     
 
     feedback_prompt = {
-        "instruction": "Please review the code and choose: *approve*, *regenerate*, *evaluate with a reference code* or to *execute the code*. Then explain your decision.",
-        "code": state.code,
+        "instruction": "Please review the code and choose: *approve*, *regenerate*, *evaluate with a reference code* or to *execute the code*. Eventually explain your decision.",
         "static_python_check": static_evaluation_result or "No pyright result",
     }
 
