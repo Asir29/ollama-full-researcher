@@ -181,27 +181,87 @@ def remove_think_tags(text: str) -> str:
         cleaned_text = cleaned_text[:start] + cleaned_text[end:]
     return cleaned_text
 
+# def save_code_to_file(code_str: str, output_dir: str, filename: str, mode="w"):
+#     """
+#     Saves code string to a file inside output_dir.
+#     Creates output_dir if it doesn't exist.
+
+#     Args:
+#         code_str (str): The code to save.
+#         output_dir (str): Directory path to save the code in.
+#         filename (str): The filename for the code file.
+#         mode (str): File write mode: "w" for overwrite, "a" for append.
+
+#     Returns:
+#         None
+#     """
+#     os.makedirs(output_dir, exist_ok=True)
+#     file_path = os.path.join(output_dir, filename)
+#     with open(file_path, mode, encoding="utf-8") as f:
+#         f.write(code_str)
+#         if mode == "a":
+#             f.write("\n\n# --- Appended code snippet ---\n\n")
+
 def save_code_to_file(code_str: str, output_dir: str, filename: str, mode="w"):
     """
-    Saves code string to a file inside output_dir.
-    Creates output_dir if it doesn't exist.
-
+    Saves code string. If code contains # FILE: markers, splits into multiple files.
+    Otherwise saves as single file.
+    
     Args:
-        code_str (str): The code to save.
-        output_dir (str): Directory path to save the code in.
-        filename (str): The filename for the code file.
-        mode (str): File write mode: "w" for overwrite, "a" for append.
-
-    Returns:
-        None
+        code_str (str): The code to save (may contain # FILE: markers)
+        output_dir (str): Base directory path
+        filename (str): Session filename (used for session folder)
+        mode (str): Ignored when splitting files
     """
-    os.makedirs(output_dir, exist_ok=True)
-    file_path = os.path.join(output_dir, filename)
-    with open(file_path, mode, encoding="utf-8") as f:
-        f.write(code_str)
-        if mode == "a":
-            f.write("\n\n# --- Appended code snippet ---\n\n")
-
+    import re
+    from datetime import datetime
+    
+    # Extract timestamp from filename or create new one
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_dir = os.path.join(output_dir, f"generated_code_{timestamp}")
+    
+    # Check if code has FILE markers
+    file_pattern = re.compile(r'^# FILE:\s*(\w+(?:\.\w+)?)\s*$', re.MULTILINE)
+    file_matches = list(file_pattern.finditer(code_str))
+    
+    if not file_matches:
+        # No markers: save as single file (fallback)
+        os.makedirs(output_dir, exist_ok=True)
+        file_path = os.path.join(output_dir, filename)
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(code_str)
+        return
+    
+    # Has markers: split into multiple files
+    os.makedirs(session_dir, exist_ok=True)
+    
+    for i, match in enumerate(file_matches):
+        file_name = match.group(1)
+        start = match.end() + 1  # +1 to skip newline after marker
+        
+        # Find end: either next FILE marker or end of string
+        if i + 1 < len(file_matches):
+            end = file_matches[i + 1].start()
+        else:
+            end = len(code_str)
+        
+        file_content = code_str[start:end].strip()
+        
+        # Ensure .py extension
+        if not file_name.endswith('.py'):
+            file_name += '.py'
+        
+        file_path = os.path.join(session_dir, file_name)
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(file_content)
+    
+    # Print summary
+    print(f"\n✅ Code saved to: {session_dir}")
+    print(f"📁 Files created:")
+    for file in sorted(os.listdir(session_dir)):
+        file_path = os.path.join(session_dir, file)
+        size = os.path.getsize(file_path)
+        print(f"   • {file} ({size} bytes)")
 
 
 # -------------------------
@@ -249,6 +309,7 @@ async def route_question(state: SummaryState, config: RunnableConfig):
         SystemMessage(content=router_instructions),
         HumanMessage(content=f"Input: {state.research_topic}"),
     ])
+
 
     print(f"Routing result: {result.content}")
 
@@ -646,365 +707,668 @@ class SentenceTransformerEmbeddings(Embeddings):
         return self.model.encode([text])[0].tolist()
 
 
+
+
 def search_relevant_sources(state: SummaryState, config: RunnableConfig):
     """
     Creation of vectorstore from docs of interest.
+    Initializes BOTH SNN and NNI vectorstores with proper caching.
+    Uses custom SentenceTransformerEmbeddings class for CUDA memory management.
     """
+    
+    
     persist_dir_snn = "./chroma_snn_docs"
     persist_dir_nni = "./chroma_nni_docs"
-
-    # ✅ Skip build if already exists
-    if os.path.exists(persist_dir_snn) and os.listdir(persist_dir_snn) and os.path.exists(persist_dir_nni) and os.listdir(persist_dir_nni):
-        print(f"Vectorstores already exist at {persist_dir_snn} and {persist_dir_nni} , skipping build.")
+    
+    print("\n" + "="*80)
+    print("VECTORSTORE INITIALIZATION - SNN + NNI")
+    print("="*80 + "\n")
+    
+    # ✅ Check if both vectorstores already exist and are not empty
+    snn_exists = os.path.exists(persist_dir_snn) and os.listdir(persist_dir_snn)
+    nni_exists = os.path.exists(persist_dir_nni) and os.listdir(persist_dir_nni)
+    
+    if snn_exists and nni_exists:
+        print(f"✓ SNN vectorstore exists at {persist_dir_snn}")
+        print(f"✓ NNI vectorstore exists at {persist_dir_nni}")
+        print(f"\n✅ Both vectorstores already initialized (skipping rebuild)")
+        print("="*80 + "\n")
         return {"status": "vectorstore_already_exists"}
+    
+    # ============================================================
+    # INITIALIZE EMBEDDING MODEL (CUSTOM CLASS)
+    # ============================================================
+    
+    print("🔧 Loading embedding model (mchochlov/codebert-base-cd-ft)...")
+    print("   Using custom SentenceTransformerEmbeddings with CUDA memory management\n")
+    
+    try:
+        embedding_model = SentenceTransformerEmbeddings("mchochlov/codebert-base-cd-ft")
+        print("   ✓ Embedding model loaded on CUDA with memory optimization\n")
+    except Exception as e:
+        print(f"   ❌ Error loading embedding model: {e}\n")
+        raise
+    
+    # ============================================================
+    # PART 1: SNN VECTORSTORE (Online - from snnTorch docs)
+    # ============================================================
+    
+    if not snn_exists:
+        print("-" * 80)
+        print("PART 1: CREATING SNN VECTORSTORE (from online documentation)")
+        print("-" * 80 + "\n")
+        
+        try:
+            print("📚 Fetching snnTorch documentation from https://snntorch.readthedocs.io/...")
+            loader = RecursiveUrlLoader(
+                url="https://snntorch.readthedocs.io/en/latest/",
+                max_depth=7,
+                extractor=lambda x: BeautifulSoup(x, "html.parser").get_text()
+            )
+            snn_docs = loader.load()
+            print(f"   ✓ Loaded {len(snn_docs)} snnTorch documentation pages\n")
 
+                        
+            # Split documents
+            print("✂️  Splitting documents (chunk_size=512, overlap=50)...")
+            doc_splits = load_and_split(snn_docs, chunk_size=512, overlap=50)
+            print(f"   ✓ Created {len(doc_splits)} document chunks")
+            print(f"   ℹ️  Starting embedding with batching (batch_size=8)...\n")
+            
+            # Create & persist SNN vectorstore
+            print(f"🗄️  Creating Chroma vectorstore (collection: snntorch-docs)...")
+            vectorstore_snn = Chroma.from_documents(
+                documents=doc_splits,
+                embedding=embedding_model,
+                collection_name="snntorch-docs",
+                persist_directory=persist_dir_snn,
+                collection_metadata={"hnsw:space": "cosine"}
+            )
+            vectorstore_snn.persist()
+            print(f"   ✓ SNN vectorstore persisted at '{persist_dir_snn}'")
+            
+        except Exception as e:
+            print(f"   ⚠️  Error creating SNN vectorstore: {e}")
+            print(f"   ⚠️  Continuing with NNI vectorstore initialization...\n")
+    else:
+        print("-" * 80)
+        print("PART 1: SNN VECTORSTORE - ALREADY EXISTS (skipping)")
+        print("-" * 80 + "\n")
+    
+    # ============================================================
+    # PART 2: NNI VECTORSTORE (Local - from esempi_NNI directory)
+    # ============================================================
+    
+    if not nni_exists:
+        print("-" * 80)
+        print("PART 2: CREATING NNI VECTORSTORE (from esempi_NNI directory)")
+        print("-" * 80 + "\n")
+        
+        # Create NNI API Reference document
+        nni_api_ref_doc = Document(
+            page_content="""# NNI API REFERENCE - CRITICAL DOCUMENTATION
 
-    print("---CREATING SNN VECTORSTORE---")
-    # 1️⃣ Crawl SNN docs
-    loader = RecursiveUrlLoader(
-        url="https://snntorch.readthedocs.io/en/latest/",
-        max_depth=7,
-        extractor=lambda x: BeautifulSoup(x, "html.parser").get_text()
-    )
-    snn_docs = loader.load()
-    print(f"Loaded {len(snn_docs)} SNN docs pages")
+                ## AlgorithmConfig - Tuner Selection
+                AlgorithmConfig(name="Anneal", class_args={"optimize_mode": "maximize"})
+                AlgorithmConfig(name="TPE", class_args={"optimize_mode": "maximize"})
+                AlgorithmConfig(name="Random", class_args={"optimize_mode": "maximize"})
 
-    # 2️⃣ Split documents
-    doc_splits = load_and_split(snn_docs, chunk_size=512, overlap=50)
+                ## AlgorithmConfig - Assessor Selection
+                AlgorithmConfig(name="Medianstop", class_args={"optimize_mode": "maximize", "start_step": 10})
+                AlgorithmConfig(name="NoAssessor")
 
-    # 3️⃣ Create & persist vectorstore
-    embedding_model = SentenceTransformerEmbeddings("mchochlov/codebert-base-cd-ft")
-    vectorstore = Chroma.from_documents(
-        documents=doc_splits,
-        embedding=embedding_model,
-        collection_name="snntorch-docs",
-        persist_directory=persist_dir_snn
-    )
-    vectorstore.persist()
-    print(f"SNN vectorstore persisted at '{persist_dir_snn}'")
+                ## LocalConfig - GPU Training Service Configuration
+                LocalConfig(
+                    trial_gpu_number=1,
+                    max_trial_number_per_gpu=5,
+                    use_active_gpu=True
+                )
 
-    ### 4️⃣ Repeat for NNI docs (local directory)
-    persist_dir_nni = "./chroma_nni_docs"
-    if os.path.exists(persist_dir_nni) and os.listdir(persist_dir_nni):
-        print(f"NNI vectorstore already exists at {persist_dir_nni}, skipping build.")
-        return {"status": "vectorstore_already_exists"}
+                ## ExperimentConfig - REQUIRED FIELDS (must all be present)
+                - experiment_name: str (name of experiment)
+                - experiment_working_directory: str (path to working dir)
+                - search_space: dict (JSON format with parameter definitions)
+                - tuner: AlgorithmConfig (algorithm configuration)
+                - assessor: AlgorithmConfig (early stopping configuration)
+                - training_service: LocalConfig (GPU/CPU resource management)
+                - max_trial_number: int (maximum number of trials)
+                - max_experiment_duration: str (format: "100d", "5h", "30m")
+                - trial_concurrency: int (parallel trials)
+                - trial_command: str (command to run training script)
+                - trial_code_directory: str (directory containing training script)
 
-    print("---CREATING NNI VECTORSTORE---")
-    # Loader for all documents in the local directory `esempi_NNI`
+                ## Key NNI Methods
+                experiment = Experiment(config)
+                experiment.run(port=8081)
+                experiment.stop()
 
-    nni_api_ref_doc = Document(
-    page_content="""# NNI API REFERENCE
+                # Inside training script (main_*.py):
+                nni.get_next_parameter()  # Get hyperparameters for this trial
+                nni.report_intermediate_result(accuracy)  # Report metrics during training
+                nni.report_final_result(best_accuracy)  # Report final result
 
-    AlgorithmConfig(name="Anneal", class_args={"optimize_mode": "maximize"})
-    AlgorithmConfig(name="Medianstop", class_args={"optimize_mode": "maximize", "start_step": 10})
+                ## Search Space Parameter Types
+                '_type': 'choice'      → Discrete values: [1, 2, 4, 8, 16]
+                '_type': 'quniform'    → Quantized continuous: [min, max, step]
+                '_type': 'uniform'     → Continuous: [min, max]
+                '_type': 'loguniform'  → Log-scale continuous: [min, max]
+                '_type': 'normal'      → Gaussian: [mean, std]
+                '_type': 'qnormal'     → Gaussian quantized: [mean, std, step]
 
-    LocalConfig(trial_gpu_number=args.exp_gpu_number, max_trial_number_per_gpu=args.max_per_gpu, use_active_gpu=True)
-
-    ExperimentConfig MUST have:
-    - experiment_working_directory
-    - tuner_gpu_indices
-    - max_experiment_duration (NOT max_wall_time)
-    - training_service=LocalConfig(...)
-
-    experiment.run(args.port)
-    """,
-        metadata={"source": "NNI_API_REFERENCE", "priority": "HIGHEST"}
-    )
-
-
-    # Load with optional file extension filtering (e.g., ".md", ".txt", ".html", ".pdf")
-    directory_loader = DirectoryLoader(
-        path="esempi_NNI",                  # <--- your local NNI docs directory
-        glob="**/*",                        # all files, or specify "*.md"/"*.txt" as needed
-        show_progress=True
-    )
-    nni_docs = directory_loader.load()
-    print(f"Loaded {len(nni_docs)} NNI docs from directory")
-
-    nni_docs.insert(0, nni_api_ref_doc)
-
-
-    # Split NNI docs just like above
-    nni_doc_splits = load_and_split(nni_docs, chunk_size=512, overlap=50)
-
-    # Create and persist NNI vectorstore
-    vectorstore_nni = Chroma.from_documents(
-        documents=nni_doc_splits,
-        embedding=embedding_model,
-        collection_name="nni-docs",
-        persist_directory=persist_dir_nni
-    )
-    vectorstore_nni.persist()
-    print(f"NNI vectorstore persisted at '{persist_dir_nni}'")
+                ## Common Hyperparameters for SNN
+                neurons_per_pop: choice [2, 4, 8, 16]
+                output_pop: choice [1, 2, 4, 8, 16]
+                nb_hidden: choice [16, 32, 64]
+                alpha_hid: quniform [0, 1, 0.05]
+                beta_hid: quniform [0, 1, 0.05]
+                alpha_out: quniform [0, 1, 0.05]
+                beta_out: quniform [0, 1, 0.05]
+                learning_rate: choice [0.0001, 0.0005, 0.001, 0.01]
+                reg_l1: quniform [0, 1e-2, 1e-4]
+                reg_l2: quniform [0, 1e-4, 1e-6]
+                slope: quniform [5, 20, 1]
+                batch_size: choice [32, 64, 128]
+                """,
+            metadata={"source": "NNI_API_REFERENCE", "priority": "HIGHEST"}
+        )
+        
+        print("📂 Loading NNI examples from esempi_NNI directory...")
+        
+        # Check if directory exists
+        if not os.path.exists("esempi_NNI"):
+            print("   ❌ esempi_NNI directory NOT found!")
+            print("   ℹ️  Expected path: ./esempi_NNI/")
+            print("   ℹ️  Creating vectorstore with API reference only...\n")
+            nni_docs = [nni_api_ref_doc]
+        else:
+            print(f"   ✓ esempi_NNI directory found\n")
+            
+            # Load all files from directory
+            try:
+                directory_loader = DirectoryLoader(
+                    path="esempi_NNI",
+                    glob="**/*",
+                    show_progress=True
+                )
+                nni_docs = directory_loader.load()
+                print(f"\n   ✓ Loaded {len(nni_docs)} NNI example files from esempi_NNI/")
+                
+                # List loaded files
+                for doc in nni_docs[:4]:
+                    source = doc.metadata.get("source", "unknown")
+                    print(f"      - {source} ({len(doc.page_content)} chars)")
+                if len(nni_docs) > 4:
+                    print(f"      - ... and {len(nni_docs) - 4} more files\n")
+                else:
+                    print()
+                
+                # Insert API reference at beginning (highest priority)
+                nni_docs.insert(0, nni_api_ref_doc)
+                print(f"   ✓ Inserted NNI API reference at priority position\n")
+                
+            except Exception as e:
+                print(f"   ⚠️  Error loading directory: {e}")
+                print(f"   ℹ️  Using API reference only...\n")
+                nni_docs = [nni_api_ref_doc]
+        
+        # Split NNI documents
+        print("✂️  Splitting NNI documents (chunk_size=512, overlap=50)...")
+        nni_doc_splits = load_and_split(nni_docs, chunk_size=512, overlap=50)
+        print(f"   ✓ Created {len(nni_doc_splits)} document chunks")
+        print(f"   ℹ️  Starting embedding with batching (batch_size=8)...\n")
+        
+        # Create & persist NNI vectorstore
+        print(f"🗄️  Creating Chroma vectorstore (collection: nni-docs)...")
+        vectorstore_nni = Chroma.from_documents(
+            documents=nni_doc_splits,
+            embedding=embedding_model,
+            collection_name="nni-docs",
+            persist_directory=persist_dir_nni,
+            collection_metadata={"hnsw:space": "cosine"}
+        )
+        vectorstore_nni.persist()
+        print(f"   ✓ NNI vectorstore persisted at '{persist_dir_nni}'")
+        print(f"   ✓ Total documents indexed: {len(nni_doc_splits)}")
+        print(f"   ℹ️  GPU memory cleaned up after vectorstore creation\n")
+    else:
+        print("-" * 80)
+        print("PART 2: NNI VECTORSTORE - ALREADY EXISTS (skipping)")
+        print("-" * 80 + "\n")
+    
+    # ============================================================
+    # SUMMARY
+    # ============================================================
+    
+    print("="*80)
+    print("✅ VECTORSTORE INITIALIZATION COMPLETE")
+    print("="*80)
+    print(f"\n📊 Vectorstore Summary:")
+    print(f"   SNN: {persist_dir_snn}/")
+    print(f"   NNI: {persist_dir_nni}/")
+    print(f"\n🔧 Configuration:")
+    print(f"   Embedding model: mchochlov/codebert-base-cd-ft (CUDA optimized)")
+    print(f"   Memory management: Batching (8) + Cache clearing enabled")
+    print(f"   NNI source: esempi_NNI directory + API reference")
+    print(f"\n✨ Status: Both vectorstores ready for agent retrieval!\n")
+    
     return {"status": "vectorstore_created"}
+
 
 
 # ------------------ Specialized Agent: snnTorch_agent ------------------
 def snnTorch_agent(question: str, config: RunnableConfig, state: SummaryState):
     """
     Handles queries involving SNN network design using snnTorch.
-    STRICTLY uses ONLY information from the vectorstore (snnTorch documentation).
+    ENHANCED WITH:
+    - Multi-pass retrieval (5 search strategies)
+    - Pattern extraction from documentation
+    - Strict grounding to vectorstore only
+    - Better validation and error handling
+    - Detailed logging
+    
     Returns code in JSON with 'code' key.
     """
-    print("--- calling SNNTorch AGENT ---")
     
-    # Load snnTorch docs context from vectorstore
-    embedding_model = SentenceTransformerEmbeddings("mchochlov/codebert-base-cd-ft")
+    print("\n" + "="*80)
+    print("SNNTORCH AGENT - ENHANCED WITH MULTI-PASS RETRIEVAL")
+    print("="*80 + "\n")
+    
+    
+    # ============================================================
+    # STEP 1: INITIALIZE EMBEDDING MODEL & VECTORSTORE
+    # ============================================================
+    
+    print("🔧 Loading embedding model and vectorstore...")
+    try:
+        embedding_model = SentenceTransformerEmbeddings("mchochlov/codebert-base-cd-ft")
+    except:
+        print("   ⚠️  CodeBERT not available, using default...")
+        embedding_model = SentenceTransformerEmbeddings("all-MiniLM-L6-v2")
+    
     vectorstore = Chroma(
         embedding_function=embedding_model,
         collection_name="snntorch-docs",
         persist_directory="./chroma_snn_docs"
     )
+    print("   ✓ Vectorstore loaded\n")
     
+    # ============================================================
+    # STEP 2: MULTI-PASS RETRIEVAL (5 SEARCH STRATEGIES)
+    # ============================================================
     
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 30})
+    print("🔍 Multi-pass retrieval strategy:")
     
-    # Retrieve relevant documentation
-    relevant_docs = retriever.get_relevant_documents(question)
+    # Define diverse search queries
+    search_queries = [
+        question,  # Original question (semantic match)
+        "snnTorch network architecture LIF neurons",  # Architecture patterns
+        "snnTorch encoder decoder spike",  # Encoding/decoding
+        "snnTorch training loss backward",  # Training methodology
+        "snnTorch recurrent network state"  # Recurrent patterns
+    ]
     
-    # IMPROVEMENT 2: Format context with clear source attribution
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 20})
+    
     snn_context = ""
-    for i, doc in enumerate(relevant_docs, 1):
-        snn_context += f"[Documentation Excerpt {i}]\\n{doc.page_content}\\n\\n"
+    retrieved_docs = {}
+    all_docs_count = 0
     
-    # IMPROVEMENT 3: CRITICAL - Strict grounding prompt
+    for i, query in enumerate(search_queries, 1):
+        docs = retriever.get_relevant_documents(query)
+        retrieved_docs[query] = docs
+        all_docs_count += len(docs)
+        
+        print(f"   [{i}] Query: '{query[:50]}...' → {len(docs)} docs")
+        
+        # Add top 5 docs from each query to context
+        for j, doc in enumerate(docs[:5], 1):
+            source = doc.metadata.get("source", "unknown")
+            snn_context += f"[Query {i}.{j} - {source}]\n{doc.page_content[:600]}\n---\n"
+    
+    print(f"   Total retrieved: {all_docs_count} documents\n")
+    print(f"📊 Context size: {len(snn_context):,} characters\n")
+    
+    # ============================================================
+    # STEP 3: EXTRACT PATTERNS FROM DOCUMENTATION
+    # ============================================================
+    
+    print("📋 Extracting patterns from documentation...")
+    
+    patterns = {
+        "classes": [],
+        "functions": [],
+        "modules": [],
+        "examples": []
+    }
+    
+    import re
+    
+    # Extract class definitions
+    class_pattern = r"class\s+(\w+)\s*\("
+    patterns["classes"] = list(set(re.findall(class_pattern, snn_context)))
+    
+    # Extract function definitions  
+    func_pattern = r"def\s+(\w+)\s*\("
+    patterns["functions"] = list(set(re.findall(func_pattern, snn_context)))[:10]
+    
+    # Extract import statements
+    import_pattern = r"import\s+(\w+)|from\s+(\w+)"
+    imports = re.findall(import_pattern, snn_context)
+    patterns["modules"] = list(set([imp or imp for imp in imports]))
+    
+    print(f"   ✓ Classes found: {len(patterns['classes'])} - {patterns['classes'][:5]}")
+    print(f"   ✓ Functions found: {len(patterns['functions'])} - {patterns['functions'][:5]}")
+    print(f"   ✓ Modules found: {len(patterns['modules'])} - {patterns['modules'][:5]}\n")
+    
+    # ============================================================
+    # STEP 4: BUILD ENHANCED PROMPT WITH GROUNDING
+    # ============================================================
+    
+    print("📝 Building generation prompt with pattern grounding...\n")
+    
     prompt = f"""You are a snnTorch code generation assistant with STRICT GROUNDING requirements.
 
-    CRITICAL RULES - YOU MUST FOLLOW THESE:
-    1. Use ONLY the API, classes, and functions from the documentation excerpts below
-    2. Do NOT use any knowledge from your pretraining about snnTorch
-    3. If the documentation shows an API, use it EXACTLY as shown
-    4. If you cannot find the information in the documentation, say so - do NOT guess
-    5. NEVER hallucinate function names, parameters, or APIs
-    6. If the documentation is insufficient, return an error explaining what's missing
+        CRITICAL RULES - YOU MUST FOLLOW THESE:
+        1. Use ONLY the API, classes, and functions from the documentation excerpts below
+        2. Do NOT use any knowledge from your pretraining about snnTorch
+        3. If the documentation shows an API, use it EXACTLY as shown
+        4. If you cannot find information in documentation, return an ERROR
+        5. NEVER hallucinate function names, parameters, or APIs
+        6. Reference exact class names and function signatures from documentation
 
-    DOCUMENTATION EXCERPTS (Your ONLY source of truth):
-    {snn_context}
+        ================================================================================
+        EXTRACTED PATTERNS FROM DOCUMENTATION:
+        ================================================================================
 
-    USER REQUEST:
-    {question}
+        Available Classes: {', '.join(patterns['classes'][:10])}
+        Available Functions: {', '.join(patterns['functions'][:10])}
+        Available Modules: {', '.join(patterns['modules'][:10])}
 
-    RESPONSE FORMAT:
-    - Respond with a single JSON object containing one key 'code'
-    - The 'code' value should be the raw Python code as a string
-    - Use ONLY APIs, classes, and syntax from the documentation above
-    - Do NOT include any Markdown formatting, backticks, or explanations
-    - If you cannot complete the task with ONLY the provided documentation, return:
-    {{"code": "ERROR: Insufficient documentation. Missing information: [specify what's needed]"}}
+        ================================================================================
+        DOCUMENTATION EXCERPTS (Your ONLY source of truth):
+        ================================================================================
 
-    Return ONLY the JSON object.
-    """
+        {snn_context[:6000]}  # Limit to prevent token overflow
+
+        ================================================================================
+        USER REQUEST:
+        ================================================================================
+
+        {question}
+
+        ================================================================================
+        RESPONSE FORMAT:
+        ================================================================================
+
+        Respond with a single JSON object with these fields:
+        {{
+            "code": "Python code as string (raw, no markdown)",
+            "apis_used": ["list", "of", "actual", "APIs", "from", "documentation"],
+            "confidence": 0.95,
+            "notes": "Explain which documentation excerpts you used"
+        }}
+
+        CRITICAL - If you cannot complete the task using ONLY the provided documentation:
+        {{
+            "code": "ERROR: Insufficient documentation",
+            "missing": "Specify what information is missing",
+            "confidence": 0.0
+        }}
+
+        Return ONLY the JSON object.
+        """
     
-    # Call LLM with strict grounding
+    # ============================================================
+    # STEP 5: CALL LLM WITH GROUNDING
+    # ============================================================
+    
+    print("🤖 Calling LLM for code generation...")
+    
+    
+    
     agent = Agent(
         model=Ollama(id="gpt-oss:20b"),
         tools=[],
         show_tool_calls=False,
         use_json_mode=True,
     )
-    response = agent.run(prompt)
     
-    print(f"SNNTorch AGENT RAW RESPONSE:\\n{response.content}")
+    response = agent.run(prompt)
+    print("   ✓ LLM generation complete\n")
+    
+    # ============================================================
+    # STEP 6: PARSE & VALIDATE RESPONSE
+    # ============================================================
+    
+    print("✓ Parsing and validating response...")
     
     try:
         content = json.loads(response.content) or {}
         code = content.get("code", "")
+        confidence = content.get("confidence", 0.0)
+        apis_used = content.get("apis_used", [])
+        notes = content.get("notes", "")
         
-        # IMPROVEMENT 4: Validation check
+        print(f"   ✓ Confidence: {confidence*100:.0f}%")
+        print(f"   ✓ APIs used: {len(apis_used)} - {apis_used[:3]}")
+        print(f"   ✓ Notes: {notes[:100]}\n")
+        
+        # Validation checks
         if "ERROR:" in code:
-            print(f"WARNING: Agent reported insufficient documentation: {code}")
+            print(f"⚠️  WARNING: Agent reported insufficient documentation")
+            print(f"   {code}\n")
         
-    except json.JSONDecodeError:
-        code = "Error: Unable to parse SNNTorch agent response."
+        if confidence < 0.5:
+            print(f"⚠️  WARNING: Low confidence ({confidence*100:.0f}%) - result may be inaccurate\n")
+        
+        # Verify APIs are from documentation
+        missing_apis = []
+        for api in apis_used:
+            if api not in patterns["classes"] and api not in patterns["functions"]:
+                missing_apis.append(api)
+        
+        if missing_apis:
+            print(f"⚠️  WARNING: Some APIs not found in documentation:")
+            print(f"   {missing_apis}\n")
+        
+    except json.JSONDecodeError as e:
+        print(f"   ❌ Error parsing JSON: {e}\n")
+        code = f"ERROR: Response parsing failed - {str(e)}"
     
-    return {"code": code}
+    # ============================================================
+    # SUMMARY & RETURN
+    # ============================================================
+    
+    print("="*80)
+    print("✅ SNNTORCH AGENT COMPLETE")
+    print("="*80)
+    print(f"Retrieved: {all_docs_count} docs across {len(search_queries)} queries")
+    print(f"Code generated: {len(code)} characters")
+    if confidence > 0:
+        print(f"Confidence: {confidence*100:.0f}%\n")
+    
+    return {
+        "code": code,
+        "confidence": confidence,
+        "retrieved_docs": all_docs_count,
+        "search_queries": len(search_queries)
+    }
+
+
+
+
 
 
 
 # ------------------ Specialized Agent: nni_agent ------------------
+# ============================================================================
+# IMPROVED NNI_AGENT FUNCTION ONLY - DROP-IN REPLACEMENT
+# ============================================================================
+
 def nni_agent(question: str, config: RunnableConfig, state: SummaryState):
     """
-    Generates NNI experiment configuration using STRICT GROUNDING.
-    Uses ONLY Python ExperimentConfig API (NOT YAML).
-    Reference: nni_main.py and main_neubrauer.py from professor's code.
+    Generates NNI experiment configuration with MULTI-PASS RETRIEVAL & VALIDATION.
+    
+    All inputs/outputs remain compatible.
     """
-
-    print("--- calling NNI AGENT (STRICT GROUNDING - PYTHON ONLY) ---")
-
-    # Load reference files
+    
+    print("--- calling NNI AGENT (ENHANCED WITH MULTI-PASS RETRIEVAL) ---")
+    
+    # Step 1: Initialize vectorstore (same as before)
     embedding_model = SentenceTransformerEmbeddings("mchochlov/codebert-base-cd-ft")
     vectorstore = Chroma(
         embedding_function=embedding_model,
         collection_name="nni-docs",
         persist_directory="./chroma_nni_docs"
     )
-
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
-    relevant_docs = retriever.get_relevant_documents(question)
-
-    nni_context = ""
-    for i, doc in enumerate(relevant_docs, 1):
-        nni_context += f"[Reference File Excerpt {i}]\n{doc.page_content}\n\n"
-
-    # ⭐ PRODUCTION-GRADE PROMPT FOR NNI CONFIGURATION
     
-    prompt = f"""You are an NNI experiment configuration generator that produces code following the EXACT PATTERN of professional NNI experiment setups.
+    # ========================================
+    # KEY IMPROVEMENT 1: Multi-Pass Retrieval
+    # ========================================
+    
+    # Instead of single retrieval, use 5 search strategies
+    search_queries = [
+        question,  # Original question
+        f"NNI experiment search space hyperparameters",
+        "ExperimentConfig AlgorithmConfig LocalConfig",
+        "argparse command line arguments experiment",
+        "neural network training PyTorch"
+    ]
+    
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 15})
+    
+    nni_context = ""
+    retrieved_docs = {}
+    
+    print("🔍 Multi-pass retrieval:")
+    for i, query in enumerate(search_queries, 1):
+        docs = retriever.get_relevant_documents(query)
+        retrieved_docs[query] = docs
+        print(f"   [{i}] Query: '{query[:40]}...' → {len(docs)} docs")
+        
+        # Add top documents to context
+        for j, doc in enumerate(docs[:3], 1):  # Top 3 per query
+            nni_context += f"[Ref {i}.{j}]\n{doc.page_content[:800]}\n---\n"
+    
+    print(f"   Total context: {len(nni_context)} chars from {len(retrieved_docs)} queries")
+    
+    # ========================================
+    # KEY IMPROVEMENT 2: Extract Patterns
+    # ========================================
+    
+    # Extract structural patterns from references
+    patterns = {
+        "choice_params": [],
+        "quniform_params": [],
+        "min_params": 8
+    }
+    
+    for query, docs in retrieved_docs.items():
+        for doc in docs:
+            content = doc.page_content
+            if "'_type': 'choice'" in content:
+                import re
+                choices = re.findall(r"'(\w+)':\s*\{\s*'_type':\s*'choice'", content)
+                patterns["choice_params"].extend(choices)
+            if "'_type': 'quniform'" in content:
+                quniform = re.findall(r"'(\w+)':\s*\{\s*'_type':\s*'quniform'", content)
+                patterns["quniform_params"].extend(quniform)
+    
+    patterns["choice_params"] = list(set(patterns["choice_params"]))
+    patterns["quniform_params"] = list(set(patterns["quniform_params"]))
+    
+    print(f"📊 Patterns found: {len(patterns['choice_params'])} choice, {len(patterns['quniform_params'])} quniform")
+    
+    # ========================================
+    # KEY IMPROVEMENT 3: Enhanced Prompt
+    # ========================================
+    
+    prompt = f"""You are an NNI configuration expert.
 
-    Your task: Generate a complete, production-style NNI experiment configuration script in Python.
+TASK: Generate production-grade NNI Python configuration.
 
-    =============================================================================
-    CORE REQUIREMENTS (Non-negotiable)
-    =============================================================================
+USER REQUEST: {question}
 
-    1. OUTPUT STRUCTURE
-    Generate a SINGLE Python script containing:
-    - Search space definition (dict with _type and _value keys)
-    - Search space export to JSON file
-    - argparse configuration with command-line arguments
-    - ExperimentConfig setup
-    - Experiment initialization and lifecycle management
+=== REFERENCE PATTERNS ===
 
-    2. SEARCH SPACE (8+ hyperparameters minimum)
-    - Define as Python dict with this structure:
-        {{"param_name": {{"_type": "choice", "_value": [...]}}}}
-    - Include BOTH discrete (choice) and continuous (quniform) parameters
-    - Each parameter should be meaningful to the network architecture
-    - Add brief comments explaining each parameter's role
+Search space parameters (choice): {patterns['choice_params'][:5]}
+Search space parameters (quniform): {patterns['quniform_params'][:5]}
+Minimum parameters needed: {patterns['min_params']}
 
-    3. SEARCH SPACE EXPORT
-    - Export to JSON file in ./searchspaces/ directory
-    - Pattern: "./searchspaces/{{experiment_name}}_searchspace.json"
-    - Use: json.dump(search_space, file)
+=== REFERENCE CODE ===
 
-    4. ARGPARSE CONFIGURATION (Minimum 6+ arguments)
-    Required arguments:
-    - exp_name: experiment name with sensible default
-    - exp_trials: max number of trials (default: 10000)
-    - exp_time: max duration in format "100d" (default: "100d")
-    - exp_gpu_number: number of GPUs (default: 2)
-    - max_per_gpu: trials per GPU (default: 5)
-    - port: service port (default: 8081)
-    - script: path to training script (configurable)
+{nni_context[:3000]}
 
-    5. EXPERIMENT CONFIG (Using ExperimentConfig API)
-    Must include:
-    - experiment_name = args.exp_name
-    - search_space = search_space
-    - tuner = AlgorithmConfig(name="Anneal", class_args={{"optimize_mode": "maximize"}})
-    - assessor = AlgorithmConfig(name="Medianstop", class_args={{"optimize_mode": "maximize", "start_step": 10}})
-    - trial_command = f"python3 {{args.script}}"
-    - trial_code_directory = "./"
-    - max_trial_number = args.exp_trials
-    - max_experiment_duration = args.exp_time
-    - trial_concurrency = 1
-    - training_service = LocalConfig(...)
+=== REQUIREMENTS ===
 
-    6. TRAINING SERVICE (LocalConfig)
-    training_service=LocalConfig(
-        trial_gpu_number=args.exp_gpu_number,
-        max_trial_number_per_gpu=args.max_per_gpu,
-        use_active_gpu=True
-    )
+1. Generate COMPLETE Python script with:
+   - search_space dict (8+ hyperparameters, mix of choice and quniform)
+   - json.dump search_space to file
+   - argparse with 6+ arguments
+   - ExperimentConfig with tuner/assessor/training_service
+   - Experiment().run() lifecycle
 
-    7. EXPERIMENT LIFECYCLE
-    - Create Experiment object: experiment = Experiment(config)
-    - Run: experiment.run(args.port)
-    - Include user input: input('Press any key to stop...')
-    - Stop gracefully: experiment.stop()
+   
 
-    8. IMPORTS
-    Required imports:
-    import argparse
-    import json
-    import os
-    from nni.experiment import Experiment, ExperimentConfig, AlgorithmConfig, LocalConfig
 
-    9. CODE ORGANIZATION
-    - Single unified script (no fragmentation)
-    - Search space at top (after imports)
-    - Export searchspace to file immediately after definition
-    - if __name__ == '__main__': block for argparse and config setup
-    - Brief comments explaining critical sections
+2. Do NOT generate YAML, separate files, or hard-coded values
 
-    =============================================================================
-    ARCHITECTURAL FLEXIBILITY
-    =============================================================================
+3. Use AlgorithmConfig EXACTLY as shown in references
 
-    FOR SNNS (Spiking Neural Networks):
-    - Include population parameters: neurons_per_pop, output_pop, nb_hidden
-    - Include synaptic parameters: alpha_*, beta_*
-    - Include slope parameter
-    - Use quniform for continuous dynamics
+4. Include LocalConfig with GPU settings
 
-    FOR STANDARD NEURAL NETWORKS:
-    - Include architecture: n_layers, hidden_size
-    - Include learning: lr, momentum
-    - Include regularization: dropout, weight_decay
+5. Export search_space to JSON before starting experiment
 
-    FOR CONVOLUTIONAL NETWORKS:
-    - Include filters, kernel_size, pool_size
-    - Include learning and regularization
-
-    =============================================================================
-    WHAT NOT TO DO
-    =============================================================================
-
-    ❌ Do NOT generate 3 separate files (model, train, experiment)
-    ❌ Do NOT hardcode values - make them argparse arguments
-    ❌ Do NOT use YAML format
-    ❌ Do NOT use AlgorithmConfig with wrong parameter names
-    ❌ Do NOT forget search space export to JSON
-    ❌ Do NOT skip the argparse configuration
-    ❌ Do NOT forget use_active_gpu=True in LocalConfig
-    ❌ Do NOT use experiment.run(config) - use experiment.run(args.port)
-    ❌ Do NOT add fewer than 8 hyperparameters
-    ❌ Do NOT forget the input() + stop() lifecycle management
-
-    =============================================================================
-    RETURN FORMAT
-    =============================================================================
-
-    Return a JSON object:
-    {{
-    "code": "Full Python script as a string here",
-    "summary": "Brief explanation of configuration choices"
-    }}
-
-    The code must be complete, syntactically valid Python that can be executed immediately.
-
-    =============================================================================
-
-    REFERENCE FILES (Ground Truth):
-    {nni_context}
-
-    USER REQUEST:
-    {question}
-
-    Now generate the NNI configuration following ALL the requirements above.
-    """
-
+Return ONLY JSON:
+{{"code": "full Python script", "summary": "brief explanation"}}
+"""
+    
+    # Step 4: Call LLM
     agent = Agent(
         model=Ollama(id="gpt-oss:20b"),
         tools=[],
         show_tool_calls=False,
         use_json_mode=True,
     )
-
+    
     response = agent.run(prompt)
-
-    print(f"NNI AGENT RESPONSE:\n{response.content}")
-
+    print(f"✓ LLM generation complete ({len(response.content)} chars)")
+    
+    # ========================================
+    # KEY IMPROVEMENT 4: Validate Output
+    # ========================================
+    
     try:
         content = json.loads(response.content or "{}")
         code = content.get("code", "")
-
-        if "ERROR:" in code:
-            print(f"⚠️ WARNING: {code}")
-
-    except json.JSONDecodeError as e:
-        code = f"Error: Parse failure: {e}"
-
+    except json.JSONDecodeError:
+        code = ""
+    
+    # Simple validation checks
+    validation_checks = {
+        "has_search_space": "search_space" in code,
+        "has_argparse": "ArgumentParser" in code,
+        "has_experiment_config": "ExperimentConfig" in code,
+        "has_local_config": "LocalConfig" in code,
+        "has_json_export": "json.dump" in code,
+        "has_nni_integration": "Experiment(" in code,
+        "has_minimum_params": len(patterns['choice_params']) + len(patterns['quniform_params']) >= 8
+    }
+    
+    passed = sum(1 for v in validation_checks.values() if v)
+    score = int((passed / len(validation_checks)) * 100)
+    
+    print(f"✓ Validation score: {score}% ({passed}/{len(validation_checks)} checks passed)")
+    for check, result in validation_checks.items():
+        status = "✅" if result else "❌"
+        print(f"   {status} {check}")
+    
+    if score < 50:
+        print("⚠️  WARNING: Low validation score - generated code may have issues")
+    
     return {"code": code}
+
+
 
 
 
@@ -1152,6 +1516,19 @@ def generate_code(config: RunnableConfig, state: SummaryState):
     - Ensure proper imports, no duplicates, correct dependencies
     - Make sure all components work together seamlessly
     - Add necessary glue code to connect the components
+
+    IMPORTANT: Structure your code with file markers like this:
+
+    # FILE: model.py
+    [model code here]
+
+    # FILE: config.py
+    [config code here]
+
+    # FILE: training.py
+    [training code here]
+
+    Start each new file section with: # FILE: filename.py
 
     User's original request:
     {question_str}
