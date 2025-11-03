@@ -1052,9 +1052,11 @@ def snnTorch_agent(question: str, config: RunnableConfig, state: SummaryState):
     patterns["functions"] = list(set(re.findall(func_pattern, snn_context)))[:10]
     
     # Extract import statements
-    import_pattern = r"import\s+(\w+)|from\s+(\w+)"
+    # CORRECT: Simple, clean regex
+    import_pattern = r"(?:import|from)\s+(\w+)"
     imports = re.findall(import_pattern, snn_context)
-    patterns["modules"] = list(set([imp or imp for imp in imports]))
+    patterns["modules"] = list(set(imports))
+
     
     print(f"   ✓ Classes found: {len(patterns['classes'])} - {patterns['classes'][:5]}")
     print(f"   ✓ Functions found: {len(patterns['functions'])} - {patterns['functions'][:5]}")
@@ -1403,32 +1405,61 @@ def generate_code(config: RunnableConfig, state: SummaryState):
         }
     ]
     
-    # System prompt for tool selection
     tool_selection_prompt = """You are a code generation orchestrator that decides which specialized tools to invoke.
 
-    Your task:
-    - Analyze the user request to determine which tools are needed
-    - For each tool, provide a specific query that asks for the relevant code component
-    - Respond with ONLY a JSON object containing tool calls
+        Your task:
+        - Analyze the user request to determine which tools are needed
+        - For each tool, provide a specific query
+        - Each tool MUST return code formatted with # FILE: markers
+        - Respond with ONLY a JSON object containing tool calls
 
-    Available tools:
-    1. snnTorch_agent: Generates SNN model architecture and training code
-    2. nni_agent: Generates NNI hyperparameter tuning configuration
+        Available tools:
+        1. snnTorch_agent: Generates SNN model code
+        - Output format: Dict with "code" key containing Python code
+        - MUST include # FILE: markers for each module/file
+        - Example output structure:
+            # FILE: model.py
+            [SNN model code]
+            
+            # FILE: utils.py
+            [helper functions]
 
-    Format:
-    {
-    "tool_calls": [
-        {"name": "snnTorch_agent", "query": "specific question for SNN code"},
-        {"name": "nni_agent", "query": "specific question for NNI setup"}
-    ]
-    }
+        2. nni_agent: Generates NNI experiment configuration
+        - Output format: Dict with "code" key containing Python code
+        - MUST include # FILE: markers for each component
+        - Example output structure:
+            # FILE: config.py
+            [NNI configuration]
+            
+            # FILE: train.py
+            [training loop]
 
-    Rules:
-    - Only include tools that are needed
-    - Each query should be focused and specific
-    - Do NOT generate code yourself - just decide which tools to call
-    - Output ONLY valid JSON
-    """
+        Response format (ONLY valid JSON, no markdown):
+        {
+        "tool_calls": [
+            {
+            "name": "snnTorch_agent",
+            "query": "specific question for SNN model code",
+            "expected_files": ["model.py", "utils.py"],
+            "format_requirement": "MUST include # FILE: markers for each file"
+            },
+            {
+            "name": "nni_agent",
+            "query": "specific question for NNI setup",
+            "expected_files": ["config.py", "train.py"],
+            "format_requirement": "MUST include # FILE: markers for each file"
+            }
+        ]
+        }
+
+        Critical Rules:
+        - Only include tools that are needed for the user request
+        - Each query should be focused and specific
+        - Do NOT generate code yourself - only decide which tools to call
+        - Output ONLY valid JSON (no markdown code blocks, no explanations)
+        - You are responsible for ensuring each tool gets a well-formed query
+        """
+
     
     prompt = (
         f"Context (previous code):\\n{state.code}\\n\\n"
@@ -1463,46 +1494,59 @@ def generate_code(config: RunnableConfig, state: SummaryState):
     
     # Execute tools and collect outputs
     tool_outputs = {}
-    
+
     for call in tool_calls:
         tool_name = call.get("name")
         query = call.get("query")
+        expected_files = call.get("expected_files", [])
         
         if not tool_name or not query:
             print(f"WARNING: Skipping invalid tool call: {call}")
             continue
         
-        print(f"\\nExecuting tool: {tool_name}")
-        print(f"Query: {query}")
+        print(f"\n📋 Executing tool: {tool_name}")
+        print(f"   Query: {query[:80]}...")
+        if expected_files:
+            print(f"   Expected output files: {expected_files}")
         
-        # Find and execute the tool
-        for tool in available_tools:
-            if tool["name"] == tool_name:
-                try:
-                    result = tool["function"](query)
-                    
-                    # Extract code from result
-                    if isinstance(result, dict):
-                        code = result.get("code", "")
-                    elif isinstance(result, str):
-                        code = result
-                    else:
-                        code = str(result)
-                    
-                    if code and code != "Error":
-                        tool_outputs[tool_name] = code
-                        print(f"✓ Collected {len(code)} chars from {tool_name}")
-                    else:
-                        print(f"✗ Tool {tool_name} returned empty/error")
-                        
-                except Exception as e:
-                    print(f"✗ Error executing {tool_name}: {e}")
-                    
-                break
-    
+        # Execute the tool
+        result = None
+        if tool_name == "snnTorch_agent":
+            result = snnTorch_agent(query, config, state)
+        elif tool_name == "nni_agent":
+            result = nni_agent(query, config, state)
+        else:
+            print(f"   ❌ Unknown tool: {tool_name}")
+            continue
+        
+        if not result:
+            print(f"   ❌ Tool returned empty result")
+            continue
+        
+        # Extract code from result
+        code = result.get("code", "") if isinstance(result, dict) else str(result)
+        
+        # VALIDATION: Check FILE marker format
+        import re
+        file_markers = re.findall(r'^# FILE:\s*(\w+(?:\.\w+)?)\s*$', code, re.MULTILINE)
+        
+        print(f"   ✓ Received {len(code)} characters of code")
+        
+        if len(file_markers) == 0:
+            print(f"   ⚠️  WARNING: No # FILE: markers found!")
+            print(f"   WRAPPING output with default marker...")
+            code = f"# FILE: {tool_name.lower()}_output.py\n{code}"
+            file_markers = [f"{tool_name.lower()}_output.py"]
+        
+        print(f"   ✓ Detected {len(file_markers)} file(s): {file_markers}")
+        tool_outputs[tool_name] = code
+
     if not tool_outputs:
-        print("ERROR: No code was generated from any tool")
+        print("\n❌ ERROR: No code was generated from any tool")
         return "Error: No code generated from tools"
+
+    print(f"\n✅ Collected {len(tool_outputs)} tool outputs ready for integration")
+
     
     print(f"\\n--- PHASE 2: CODE INTEGRATION ---")
     print(f"Integrating {len(tool_outputs)} code components...")
@@ -1540,35 +1584,158 @@ def generate_code(config: RunnableConfig, state: SummaryState):
     for tool_name, code in tool_outputs.items():
         integration_prompt += f"\\n\\n=== Code from {tool_name} ===\\n{code}\\n"
     
-    integration_prompt += """
+    integration_prompt = """You are a code integration expert with STRICT FORMATTING requirements.
 
-    Requirements for integration:
-    1. Consolidate all imports at the top
-    2. Remove any duplicate code
-    3. Ensure the NNI configuration references the correct model class
-    4. Add comments explaining how components connect
-    5. Create a coherent file structure (separate files if needed, clearly marked)
-    6. Make sure the code is ready to run
+        Your PRIMARY task:
+        - Integrate multiple code components into ONE coherent solution
+        - Structure output with # FILE: markers for each distinct file
+        - Ensure all files work together seamlessly
 
-    Output ONLY the integrated code solution. Use clear section markers if multiple files are needed.
-    """
+        CRITICAL FORMATTING RULES (MUST FOLLOW):
+
+        1. OUTPUT STRUCTURE:
+        Every file MUST start with: # FILE: filename.py
+        
+        Example:
+        # FILE: model.py
+        import torch
+        import snntorch as snn
+        
+        class SNNModel(torch.nn.Module):
+            pass
+        
+        # FILE: config.py
+        LEARNING_RATE = 0.001
+        
+        # FILE: training.py
+        from model import SNNModel
+        from config import LEARNING_RATE
+
+        2. FILE MARKERS:
+        - Format: "# FILE: filename.py" (with exactly one space after #)
+        - Must be at start of line (no indentation)
+        - filename must include .py extension
+        - Each new file starts with its own marker
+        - NEVER reuse markers for the same file
+
+        3. FILE ORGANIZATION:
+        - Arrange files in logical order (dependencies first):
+            1. config.py or constants
+            2. model.py or classes
+            3. utils.py or helper functions
+            4. main.py or training.py (entry point last)
+        
+        4. IMPORTS:
+        - Consolidate all imports at the top of each file
+        - Use relative imports between your generated files
+        - Example: from config import PARAM
+        - Do NOT repeat imports across files
+
+        5. OUTPUT CONSTRAINTS:
+        - Output ONLY Python code with # FILE: markers
+        - NO markdown code fences (```python, ``` etc)
+        - NO section headers (===, ---, etc)
+        - NO explanations or comments outside code
+        - NO "Here is the integrated code" preamble
+        - Start directly with "# FILE: first_file.py"
+
+        6. VALIDATION:
+        - Each file must be self-contained (can understand imports)
+        - NNI configurations must reference correct model class names
+        - All imports must be available (standard library or mentioned in requirements)
+        - Clear dependencies documented in comments
+
+        USER REQUEST: {question_str}
+
+        CODE COMPONENTS TO INTEGRATE:
+        """
+            
+        # Add each tool output
+    for tool_name, code in tool_outputs.items():
+        integration_prompt += f"\n=== CODE FROM {tool_name} ===\n{code}\n"
+
+        integration_prompt += """
+
+        FINAL INTEGRATION CHECKLIST:
+        □ All files have "# FILE: filename.py" markers
+        □ Files ordered by dependency
+        □ No duplicate imports
+        □ Relative imports between files work
+        □ Model classes match NNI config references
+        □ All files present as expected
+
+        Remember: Your output is parsed programmatically.
+        Any deviation from # FILE: format will break the code execution system.
+
+        Output ONLY the integrated code. Start with "# FILE: " immediately.
+        """
+
     
-    # Call orchestrator for integration
+    # Get integration response
     integration_response = Agent(
         model=Ollama(id="gpt-oss:20b"),
         tools=[],
         show_tool_calls=False,
     ).run(integration_prompt)
-    
+
     integrated_code = integration_response.content
-    
-    print(f"✓ Integration complete")
-    print(f"Final code length: {len(integrated_code)} characters")
-    
-    # Save to state
+
+    # ============================================================
+    # VALIDATION: Check integration output format
+    # ============================================================
+
+    import re
+
+    print("\n" + "="*80)
+    print("INTEGRATION OUTPUT VALIDATION")
+    print("="*80)
+
+    # Extract all file markers
+    file_markers = re.findall(r'^# FILE:\s*(\w+(?:\.\w+)?)\s*$', integrated_code, re.MULTILINE)
+
+    print(f"\n📊 Files detected: {len(file_markers)}")
+    for i, fname in enumerate(file_markers, 1):
+        print(f"   {i}. {fname}")
+
+    # Validation checks
+    checks = {
+        "has_file_markers": len(file_markers) > 0,
+        "files_have_py_extension": all(f.endswith('.py') for f in file_markers),
+        "unique_filenames": len(file_markers) == len(set(file_markers)),
+        "has_model_file": any('model' in f.lower() for f in file_markers),
+        "starts_with_file_marker": integrated_code.lstrip().startswith("# FILE:"),
+    }
+
+    passed = sum(1 for v in checks.values() if v)
+    score = int((passed / len(checks)) * 100)
+
+    print(f"\n✓ Validation score: {score}% ({passed}/{len(checks)} checks passed)")
+
+    for check_name, result in checks.items():
+        status = "✅" if result else "❌"
+        print(f"  {status} {check_name}")
+
+    # Warnings for common issues
+    if len(file_markers) == 0:
+        print("\n⚠️  CRITICAL: No # FILE: markers found!")
+        print("   Attempting to wrap output...")
+        integrated_code = f"# FILE: main.py\n{integrated_code}"
+
+    if "```" in integrated_code:
+        print("\n⚠️  WARNING: Found markdown code fences (```)")
+        print("   Removing markdown formatting...")
+        integrated_code = re.sub(r"```[^`]*\n?", "", integrated_code)
+
+    if not integrated_code.lstrip().startswith("# FILE:"):
+        print("\n⚠️  WARNING: Output doesn't start with # FILE: marker")
+        print("   This may cause parsing issues!")
+
+    print(f"\nFinal code length: {len(integrated_code):,} characters")
+    print("="*80 + "\n")
+
     state.code = integrated_code
-    
     return integrated_code
+
 
 
 
@@ -1745,131 +1912,489 @@ def generate(state: SummaryState, config: RunnableConfig):
 
 
 
+# ============================================================================
+# E2B INTEGRATION: Multi-File Code Execution in Sandbox
+# ============================================================================
+
+from typing import Dict, List, Optional
 
 
+def parse_multifile_code(code_str: str) -> Dict[str, str]:
+    """
+    Parse code string with # FILE: markers into separate files.
+    
+    Args:
+        code_str: Generated code with # FILE: markers
+        
+    Returns:
+        dict: {filename: content} mapping
+    """
+    file_pattern = re.compile(r'^# FILE:\s*(\w+(?:\.\w+)?)\s*$', re.MULTILINE)
+    file_matches = list(file_pattern.finditer(code_str))
+    
+    if not file_matches:
+        return {"main.py": code_str}
+    
+    files = {}
+    
+    for i, match in enumerate(file_matches):
+        filename = match.group(1)
+        
+        if not filename.endswith('.py'):
+            filename = filename + '.py'
+        
+        start = match.end() + 1
+        end = file_matches[i + 1].start() if i + 1 < len(file_matches) else len(code_str)
+        
+        file_content = code_str[start:end].rstrip()
+        
+        if file_content.strip():
+            files[filename] = file_content
+    
+    return files
 
+
+def detect_main_file(files: Dict[str, str], hint: Optional[str] = None) -> str:
+    """
+    Auto-detect the main/entry-point file.
+    
+    Args:
+        files: dict of {filename: content}
+        hint: optional hint for main file name
+        
+    Returns:
+        str: filename of main entry point
+    """
+    if hint and hint in files:
+        return hint
+    
+    priority_names = ["main.py", "train.py", "experiment.py"]
+    for name in priority_names:
+        if name in files:
+            return name
+    
+    keywords = ['main', 'train', 'run', 'execute']
+    for filename in files.keys():
+        for keyword in keywords:
+            if keyword in filename.lower():
+                return filename
+    
+    return list(files.keys())
+
+
+def extract_packages_from_imports(imports_str: str) -> List[str]:
+    """
+    Extract package names from import statements.
+    
+    Args:
+        imports_str: String containing import statements
+        
+    Returns:
+        list: Package names to install
+    """
+    pattern = r"(?:^import|^from)\s+(\w+)"
+    matches = re.findall(pattern, imports_str, re.MULTILINE)
+    
+    pip_mapping = {
+        'cv2': 'opencv-python',
+        'PIL': 'Pillow',
+        'sklearn': 'scikit-learn',
+        'yaml': 'PyYAML',
+        'snntorch': 'snntorch',
+    }
+    
+    builtin = {
+        'os', 'sys', 'json', 're', 'datetime', 'math', 'random',
+        'collections', 'itertools', 'functools', 'pathlib', 'typing',
+        'subprocess', 'shutil', 'tempfile', 'hashlib', 'uuid'
+    }
+    
+    packages = []
+    for module in matches:
+        if module not in builtin:
+            package = pip_mapping.get(module, module)
+            if package not in packages:
+                packages.append(package)
+    
+    return packages
+
+
+def upload_and_execute_in_e2b(
+    code_str: str,
+    main_file: Optional[str] = None,
+    install_packages: Optional[List[str]] = None,
+    timeout_ms: int = 0,
+    verbose: bool = True
+) -> Dict:
+    """
+    Upload multi-file code to E2B sandbox and execute.
+    
+    Args:
+        code_str: Generated code with # FILE: markers
+        main_file: Entry point filename (auto-detected if None)
+        install_packages: List of packages to pip install
+        timeout_ms: Execution timeout in milliseconds
+        verbose: Print status messages
+        
+    Returns:
+        dict: {success, exit_code, stdout, stderr, files, error}
+    """
+    
+    if verbose:
+        print("\n" + "="*80)
+        print("E2B SANDBOX EXECUTION")
+        print("="*80 + "\n")
+    
+    try:
+        # STEP 1: Parse code
+        files = parse_multifile_code(code_str)
+        
+        if verbose:
+            print(f"📁 PARSING: {len(files)} file(s)")
+            for fname in files.keys():
+                print(f"   - {fname} ({len(files[fname])} chars)")
+            print()
+        
+        # STEP 2: Detect main file
+        if main_file is None:
+            main_file = detect_main_file(files)
+        
+        if main_file not in files:
+            return {
+                "success": False,
+                "error": f"Main file '{main_file}' not found",
+                "files": files,
+                "exit_code": -1,
+                "stdout": "",
+                "stderr": ""
+            }
+        
+        if verbose:
+            print(f"🎯 ENTRY POINT: {main_file}\n")
+        
+        # STEP 3: Create sandbox
+        if verbose:
+            print(f"🚀 CREATING SANDBOX")
+        
+        sandbox = Sandbox.create(template="code-interpreter-v1")
+        
+        if verbose:
+            print(f"   Sandbox ID: {sandbox.sandbox_id}\n")
+        
+        # STEP 4: Install packages
+        if install_packages:
+            if verbose:
+                print(f"📦 INSTALLING PACKAGES")
+            
+            for package in install_packages:
+                if verbose:
+                    print(f"   Installing {package}...", end=" ")
+                
+                try:
+                    if package.lower() in ["pytorch", "torch"]:
+                        cmd = "pip install torch --index-url https://download.pytorch.org/whl/cpu"
+                    elif package.lower() in ["tensorflow"]:
+                        cmd = "pip install --no-cache-dir tensorflow-cpu"
+                    elif package.lower() in ["opencv", "cv2"]:
+                        cmd = "pip install opencv-python-headless"
+                    elif package.lower() in ["os", "sys", "json", "re", "datetime"]:
+                        if verbose:
+                            print("(built-in)")
+                        continue
+                    else:
+                        cmd = f"pip install {package}"
+                    
+                    sandbox.commands.run(cmd, timeout=0) # cpu version of  torch, lighter (the sandbox is 1GB)
+
+                    
+                    if verbose:
+                        print("✓")
+                except Exception as e:
+                    if verbose:
+                        #print(f"✗ ({str(e)[:30]})")
+                        print(f"✗ {str(e)}")
+            
+            if verbose:
+                print()
+        
+        # STEP 5: Upload files
+        if verbose:
+            print(f"📤 UPLOADING FILES")
+        
+        upload_dir = "/home/user"
+        sandbox.commands.run(f"mkdir -p {upload_dir}", timeout_ms=0)
+        
+        for filename, content in files.items():
+            remote_path = f"{upload_dir}/{filename}"
+            
+            try:
+                sandbox.files.write(remote_path, content)
+                if verbose:
+                    print(f"   ✓ {filename}")
+            except Exception as e:
+                sandbox.kill()
+                return {
+                    "success": False,
+                    "error": f"Failed to upload {filename}: {str(e)}",
+                    "files": files,
+                    "exit_code": -1,
+                    "stdout": "",
+                    "stderr": ""
+                }
+        
+        if verbose:
+            print()
+        
+        # STEP 6: Execute
+        if verbose:
+            print(f"▶️  EXECUTING {main_file}")
+            print("="*80)
+            print()
+        
+        exec_result = sandbox.commands.run(
+            f"cd {upload_dir} && python {main_file}",
+            timeout_ms=timeout_ms
+        )
+        
+        if verbose:
+            print("="*80)
+            print()
+            print(f"📊 RESULTS:")
+            print(f"   Exit code: {exec_result.exit_code}")
+            if exec_result.stdout:
+                print(f"\n   STDOUT:\n{exec_result.stdout}")
+            if exec_result.stderr:
+                print(f"\n   STDERR:\n{exec_result.stderr}")
+            print()
+        
+        # STEP 7: Cleanup
+        sandbox.kill()
+        
+        return {
+            "success": exec_result.exit_code == 0,
+            "exit_code": exec_result.exit_code,
+            "stdout": exec_result.stdout or "",
+            "stderr": exec_result.stderr or "",
+            "files": files,
+            "error": None if exec_result.exit_code == 0 else "Non-zero exit"
+        }
+    
+    except Exception as e:
+        if 'sandbox' in locals():
+            try:
+                sandbox.kill()
+            except:
+                pass
+        
+        return {
+            "success": False,
+            "error": f"E2B execution failed: {str(e)}",
+            "files": {},
+            "exit_code": -1,
+            "stdout": "",
+            "stderr": str(e)
+        }
 
 
 def check_code_sandbox(state: SummaryState, config: RunnableConfig):
     """
-    Check code in a sandbox with dependency installation.
+    Check code in E2B sandbox with multi-file support.
     """
-    print("---CHECKING CODE IN SANDBOX---")
-    #agent that extracts ONLY the imports
-
-    code = ""
-
-    #print("state in check_code_sandbox: ", state)
-
-    print("Current state.user_feedback_processed: ", state.user_feedback_processed)
-    if state.user_feedback_processed == "evaluation":
-        code = state.normalized_code # from normalization step
-    elif state.user_feedback_processed == "execute":
-        code = state.code # from code generation step
-
+    
+    print("\n" + "="*80)
+    print("SANDBOX EXECUTION WITH E2B")
+    print("="*80 + "\n")
+    
+    # Get code from state
+    code = state.normalized_code if state.user_feedback_processed == "evaluation" else state.code
+    
+    # Extract imports
+    print("Extracting dependencies...\n")
+    
     agent = Agent(
         model=Ollama(id="qwen3:latest"),
         tools=[],
         show_tool_calls=False,
-        use_json_mode=False,
     )
     
-    imports_extractor_instructions = """
-    You are given a block of Python code.
-    Your task is to return ONLY the import statements as a single block of text.
-    ### Instructions:
-    - Output ONLY the import statements, preserving their order, Separated by new lines.
-    - Do NOT include explanations, markdown, quotes, or code fences.
-    - Exclude any comments or non-import lines.
-
-    - example:
-        import torch
-        import snntorch as snn
-        
-    """
-    #print("Code to extract imports from:\n", code)
-    query = imports_extractor_instructions + "\n Code:\n" + code + "\n"
-
-    response = agent.run(query)
-
+    imports_extractor = """You are given Python code. Return ONLY import statements.
+Do NOT include explanations or code fences. Just imports."""
     
+    response = agent.run(imports_extractor + "\n\nCode:\n" + code)
     imports = response.content
     
-    print("Imports to give to extract_packages:", imports)
-    #code = state.code_generation.code or ""
-    
-    cleaned_code = code.replace("```python\n", "").replace("\n```", "") # remove markdown formatting if any
-    #combined_code = f"{imports}\n{code}"
-    
-
-
-    #sandbox_pyright = Sandbox.create("OpenEvalsPython") # already with pyright and uv installed
-    static_evaluator = create_pyright_evaluator()
-
-
-    sandbox_execution = Sandbox.create(
-            template="code-interpreter-v1",
-    ) # with this use sbx.run_code
-    
-    metrics = sandbox_execution.get_metrics() 
-    print("Sandbox metrics:", metrics)
-    
-    # Static type check
-    static_evaluation_result = static_evaluator(outputs=cleaned_code)
-    
-    # Extract dependencies via LLM
+    # Extract packages
     try:
         packages = extract_packages_from_imports(imports)
-        print("Inferred packages:", packages)
+        print(f"Packages to install: {packages}\n")
     except Exception as e:
-        print("Fallback to empty package list due to error:", e)
+        print(f"Package extraction failed: {e}\n")
         packages = []
-
-    # Install packages
-    for pkg in packages:
-        print(f"Installing {pkg} in sandbox...")
-
-        if pkg in ["pytorch","torch"]:
-            sandbox_execution.commands.run("pip install torch --index-url https://download.pytorch.org/whl/cpu", timeout=0) # cpu version of  torch, lighter (the sandbox is 1GB)
-        elif pkg in ["tensorflow"]:
-            sandbox_execution.commands.run("pip install --no-cache-dir tensorflow-cpu", timeout=0) # cpu version of tensorflow, lighter
-        elif pkg in ["sklearn"]:
-            sandbox_execution.commands.run("pip install scikit-learn", timeout=0) # sklearn is actually scikit-learn
-        elif pkg in ["opencv", "cv2"]:
-            sandbox_execution.commands.run("pip install opencv-python-headless", timeout=0)
-        elif pkg in ["PIL"]:
-            sandbox_execution.commands.run("pip install Pillow", timeout=0)
-        elif pkg in ["torchvision"]:
-            sandbox_execution.commands.run("pip install --no-deps --only-binary=:all: torchvision", timeout=0)
-        elif pkg in ["os"]:
-            print("Skipping installation of built-in package 'os'")
-        else:
-            result = sandbox_execution.commands.run(f"pip install {pkg}", timeout=0)
-            print(result.stdout or result.stderr)
-
-    print("code to execute in sandbox:\n", cleaned_code)
-
-    # Execution check
-    evaluator_exec = create_e2b_execution_evaluator(sandbox=sandbox_execution)
-    eval_result_execution = evaluator_exec(outputs=cleaned_code)
-    print("Execution result:", eval_result_execution)
-
-    # Direct execution in sandbox (outside evaluator)
-    run_result = sandbox_execution.run_code(cleaned_code)
-
-    sandbox_execution.kill()
-
-    print("=== STDOUT ===")
-    print(run_result)
     
-    state.sandbox_execution_result = run_result
+    # Static type check
+    print("Running static type check...\n")
+    static_evaluator = create_pyright_evaluator()
+    static_result = static_evaluator(outputs=code)
     
-
+    # Clean code
+    cleaned_code = code.replace("```python\n", "").replace("\n```", "")
+    
+    # Execute in E2B
+    print("Executing in E2B sandbox...\n")
+    
+    sandbox_result = upload_and_execute_in_e2b(
+        code_str=cleaned_code,
+        main_file=None,
+        install_packages=packages,
+        timeout_ms=120000,
+        verbose=True
+    )
+    
+    # Store results
+    state.sandbox_execution_result = sandbox_result
+    
+    # Prepare feedback
+    if sandbox_result["success"]:
+        feedback = f"✅ Execution successful.\n\nOutput:\n{sandbox_result['stdout']}"
+    else:
+        error_msg = sandbox_result.get("stderr", sandbox_result.get("error", "Unknown error"))
+        feedback = f"❌ Execution failed.\n\nError:\n{error_msg}"
+    
     return {
-        "sandbox_feedback_pyright": static_evaluation_result or "No pyright result",
-        "sandbox_feedback_execution": eval_result_execution,
-        "sandbox_execution_result": run_result
+        "sandbox_feedback_pyright": static_result or "No result",
+        "sandbox_feedback_execution": {
+            "status": "executed",
+            "exit_code": sandbox_result["exit_code"],
+            "success": sandbox_result["success"]
+        },
+        "sandbox_execution_result": sandbox_result,
+        "sandbox_feedback_user": feedback
     }
+
+
+
+
+
+# def check_code_sandbox(state: SummaryState, config: RunnableConfig):
+#     """
+#     Check code in a sandbox with dependency installation.
+#     """
+#     print("---CHECKING CODE IN SANDBOX---")
+#     #agent that extracts ONLY the imports
+
+#     code = ""
+
+#     #print("state in check_code_sandbox: ", state)
+
+#     print("Current state.user_feedback_processed: ", state.user_feedback_processed)
+#     if state.user_feedback_processed == "evaluation":
+#         code = state.normalized_code # from normalization step
+#     elif state.user_feedback_processed == "execute":
+#         code = state.code # from code generation step
+
+#     agent = Agent(
+#         model=Ollama(id="qwen3:latest"),
+#         tools=[],
+#         show_tool_calls=False,
+#         use_json_mode=False,
+#     )
+    
+#     imports_extractor_instructions = """
+#     You are given a block of Python code.
+#     Your task is to return ONLY the import statements as a single block of text.
+#     ### Instructions:
+#     - Output ONLY the import statements, preserving their order, Separated by new lines.
+#     - Do NOT include explanations, markdown, quotes, or code fences.
+#     - Exclude any comments or non-import lines.
+
+#     - example:
+#         import torch
+#         import snntorch as snn
+        
+#     """
+#     #print("Code to extract imports from:\n", code)
+#     query = imports_extractor_instructions + "\n Code:\n" + code + "\n"
+
+#     response = agent.run(query)
+
+    
+#     imports = response.content
+    
+#     print("Imports to give to extract_packages:", imports)
+#     #code = state.code_generation.code or ""
+    
+#     cleaned_code = code.replace("```python\n", "").replace("\n```", "") # remove markdown formatting if any
+#     #combined_code = f"{imports}\n{code}"
+    
+
+
+#     #sandbox_pyright = Sandbox.create("OpenEvalsPython") # already with pyright and uv installed
+#     static_evaluator = create_pyright_evaluator()
+
+
+#     sandbox_execution = Sandbox.create(
+#             template="code-interpreter-v1",
+#     ) # with this use sbx.run_code
+    
+#     metrics = sandbox_execution.get_metrics() 
+#     print("Sandbox metrics:", metrics)
+    
+#     # Static type check
+#     static_evaluation_result = static_evaluator(outputs=cleaned_code)
+    
+#     # Extract dependencies via LLM
+#     try:
+#         packages = extract_packages_from_imports(imports)
+#         print("Inferred packages:", packages)
+#     except Exception as e:
+#         print("Fallback to empty package list due to error:", e)
+#         packages = []
+
+#     # Install packages
+#     for pkg in packages:
+#         print(f"Installing {pkg} in sandbox...")
+
+#         if pkg in ["pytorch","torch"]:
+#             sandbox_execution.commands.run("pip install torch --index-url https://download.pytorch.org/whl/cpu", timeout=0) # cpu version of  torch, lighter (the sandbox is 1GB)
+#         elif pkg in ["tensorflow"]:
+#             sandbox_execution.commands.run("pip install --no-cache-dir tensorflow-cpu", timeout=0) # cpu version of tensorflow, lighter
+#         elif pkg in ["sklearn"]:
+#             sandbox_execution.commands.run("pip install scikit-learn", timeout=0) # sklearn is actually scikit-learn
+#         elif pkg in ["opencv", "cv2"]:
+#             sandbox_execution.commands.run("pip install opencv-python-headless", timeout=0)
+#         elif pkg in ["PIL"]:
+#             sandbox_execution.commands.run("pip install Pillow", timeout=0)
+#         elif pkg in ["torchvision"]:
+#             sandbox_execution.commands.run("pip install --no-deps --only-binary=:all: torchvision", timeout=0)
+#         elif pkg in ["os"]:
+#             print("Skipping installation of built-in package 'os'")
+#         else:
+#             result = sandbox_execution.commands.run(f"pip install {pkg}", timeout=0)
+#             print(result.stdout or result.stderr)
+
+#     print("code to execute in sandbox:\n", cleaned_code)
+
+#     # Execution check
+#     evaluator_exec = create_e2b_execution_evaluator(sandbox=sandbox_execution)
+#     eval_result_execution = evaluator_exec(outputs=cleaned_code)
+#     print("Execution result:", eval_result_execution)
+
+#     # Direct execution in sandbox (outside evaluator)
+#     run_result = sandbox_execution.run_code(cleaned_code)
+
+#     sandbox_execution.kill()
+
+#     print("=== STDOUT ===")
+#     print(run_result)
+    
+#     state.sandbox_execution_result = run_result
+    
+
+#     return {
+#         "sandbox_feedback_pyright": static_evaluation_result or "No pyright result",
+#         "sandbox_feedback_execution": eval_result_execution,
+#         "sandbox_execution_result": run_result
+#     }
 
 
 
