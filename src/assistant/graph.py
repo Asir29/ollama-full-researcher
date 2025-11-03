@@ -954,247 +954,440 @@ def search_relevant_sources(state: SummaryState, config: RunnableConfig):
     return {"status": "vectorstore_created"}
 
 
+def generate_optimized_search_queries(
+    user_question: str,
+    num_queries: int = 10,
+    model_id: str = "gpt-oss:20b"
+) -> list:
+    """
+    Generate diverse, optimized search queries based on user question.
+    
+    Args:
+        user_question: The original user request
+        num_queries: Number of queries to generate (default 10)
+        model_id: LLM model to use
+        
+    Returns:
+        list: Optimized search queries ranked by relevance
+    """
+    
+
+    # --- Helper: Safe JSON extraction ---
+    def safe_llm_json(content: str):
+        content = content.strip()
+        if content.startswith("```"):
+            content = re.sub(r"^```[a-zA-Z]*\n?", "", content)
+            content = re.sub(r"\n?```$", "", content)
+            content = content.strip()
+        return json.loads(content)
+
+    query_generation_prompt = f"""You are an expert at generating comprehensive search queries for machine learning documentation retrieval.
+
+Your task: Given a user's question, generate {num_queries} DIVERSE, SPECIFIC search queries that will retrieve all relevant documentation needed to answer the question.
+
+Requirements:
+1. Each query should target a DIFFERENT aspect of the problem
+2. Queries should be specific (include library names, parameter names, concrete concepts)
+3. Order queries by importance (most critical first)
+4. Avoid duplicate queries or queries that would return the same results
+5. Include both broad and narrow/specific queries
+6. Cover architecture, implementation, training, and evaluation aspects
+
+User Question: {user_question}
+
+Format: Return ONLY a JSON array of query strings:
+["query1", "query2", "query3", ...]
+
+Think about WHAT DOCUMENTATION SECTIONS would be needed to answer this question.
+"""
+
+    agent = Agent(
+        model=Ollama(id=model_id),
+        tools=[],
+        show_tool_calls=False,
+        use_json_mode=True,
+    )
+
+    try:
+        response = agent.run(query_generation_prompt)
+        print("\n📝 Raw query generation response:\n", response.content[:800], "...\n")
+        
+        # ✅ Clean and parse JSON safely
+        queries = safe_llm_json(response.content)
+        
+        if not isinstance(queries, list):
+            raise ValueError("Expected list of queries")
+        
+        # Clean and limit to desired number
+        queries = [
+            q.strip() for q in queries
+            if isinstance(q, str) and q.strip()
+        ][:num_queries]
+        
+        print(f"✓ Generated {len(queries)} search queries")
+        for i, q in enumerate(queries, 1):
+            print(f"  [{i}] {q}")
+        
+        return queries
+
+    except Exception as e:
+        print(f"⚠️ Query generation failed: {e}")
+        print("   Falling back to default queries")
+        return [
+            user_question,
+            "snnTorch architecture LIF neurons",
+            "PyTorch spiking neural network example",
+            "NNI experiment configuration JSON",
+            "Neural optimization learning rate tuning",
+            "snnTorch backward propagation spike timing",
+            "snnTorch dataset preprocessing MNIST",
+            "NNI tuner search space Python config",
+            "spiking neural networks parameter optimization",
+            "PyTorch training loop with NNI integration"
+        ]
+
+
+
+import json
+from typing import List
+
+def rank_queries_by_relevance(
+    user_question: str,
+    generated_queries: List[str],
+    model_id: str = "gpt-oss:20b"
+) -> List[str]:
+    """
+    Rank generated queries by relevance to the user's question.
+
+    Args:
+        user_question: Original user question
+        generated_queries: List of candidate queries
+        model_id: LLM model to use
+
+    Returns:
+        list: Ranked queries (highest relevance first)
+    """
+
+    ranking_prompt = f"""You are an expert at ranking search query relevance.
+
+User Question: {user_question}
+
+Candidate Queries:
+"""
+    for i, query in enumerate(generated_queries, 1):
+        ranking_prompt += f"{i}. {query}\n"
+
+    ranking_prompt += """
+Your task: Rank these queries by RELEVANCE to answering the user's question.
+
+Return ONLY a JSON object:
+{
+  "ranked_queries": ["most_relevant_query", "second_most_relevant", ...],
+  "reasoning": "Brief explanation of ranking"
+}
+
+Focus on:
+- Core concepts mentioned in question
+- Implementation details needed
+- Training and evaluation requirements
+"""
+
+    # Initialize LLM agent
+    agent = Agent(
+        model=Ollama(id=model_id),
+        tools=[],
+        show_tool_calls=False,
+        use_json_mode=True,
+    )
+
+    try:
+        response = agent.run(ranking_prompt)
+        print("\n📝 Raw query ranking response:", response)
+
+        content = response.content.strip()
+
+        # Remove markdown code fences if present
+        if content.startswith("```"):
+            # Remove starting and ending code fences
+            content = re.sub(r"^```[\w-]*\n?", "", content)
+            content = re.sub(r"\n?```$", "", content)
+            content = content.strip()
+
+        # Parse JSON response
+        result = json.loads(content)
+        ranked = result.get("ranked_queries", generated_queries)
+
+        print(f"\n📊 Ranked {len(ranked)} queries:")
+        for i, q in enumerate(ranked, 1):
+            print(f"  [{i}] {q}")
+
+        return ranked
+
+    except Exception as e:
+        print(f"⚠️ Ranking failed: {e}")
+        return generated_queries
+
+
+
+
+
+def expand_query_context(
+    query: str,
+    context_type: str = "general"
+) -> str:
+    """
+    Expand a query with contextual information.
+    
+    Args:
+        query: Base search query
+        context_type: "general", "architecture", "training", "evaluation"
+        
+    Returns:
+        str: Expanded query with context
+        
+    Example:
+        >>> expand_query_context("SNN classification", "training")
+        "snnTorch SNN classification training loss optimization"
+    """
+    
+    expansions = {
+        "architecture": [
+            "layer structure",
+            "neuron initialization",
+            "connection patterns",
+            "parameters configuration"
+        ],
+        "training": [
+            "loss function",
+            "optimization",
+            "backpropagation",
+            "gradient flow"
+        ],
+        "evaluation": [
+            "accuracy metrics",
+            "performance benchmarks",
+            "inference speed"
+        ],
+        "implementation": [
+            "forward pass",
+            "backward pass",
+            "computational cost",
+            "memory usage"
+        ]
+    }
+    
+    context_words = expansions.get(context_type, expansions["general"])
+    
+    # Add random context words to query
+    import random
+    added_context = random.sample(context_words, min(2, len(context_words)))
+    expanded = query + " " + " ".join(added_context)
+    
+    return expanded
+
 
 # ------------------ Specialized Agent: snnTorch_agent ------------------
 def snnTorch_agent(question: str, config: RunnableConfig, state: SummaryState):
     """
-    Handles queries involving SNN network design using snnTorch.
-    ENHANCED WITH:
-    - Multi-pass retrieval (5 search strategies)
-    - Pattern extraction from documentation
-    - Strict grounding to vectorstore only
-    - Better validation and error handling
-    - Detailed logging
-    
-    Returns code in JSON with 'code' key.
+    Enhanced snnTorch agent with LLM-guided search query generation,
+    multi-pass retrieval with ranked queries, and robust JSON parsing.
     """
-    
+
+
     print("\n" + "="*80)
-    print("SNNTORCH AGENT - ENHANCED WITH MULTI-PASS RETRIEVAL")
+    print("SNNTORCH AGENT - LLM-OPTIMIZED MULTI-PASS RETRIEVAL")
     print("="*80 + "\n")
-    
-    
-    # ============================================================
-    # STEP 1: INITIALIZE EMBEDDING MODEL & VECTORSTORE
-    # ============================================================
-    
+
+    # STEP 1: Initialize embedding model & vectorstore
     print("🔧 Loading embedding model and vectorstore...")
     try:
         embedding_model = SentenceTransformerEmbeddings("mchochlov/codebert-base-cd-ft")
-    except:
-        print("   ⚠️  CodeBERT not available, using default...")
+    except Exception:
         embedding_model = SentenceTransformerEmbeddings("all-MiniLM-L6-v2")
-    
+
     vectorstore = Chroma(
         embedding_function=embedding_model,
         collection_name="snntorch-docs",
         persist_directory="./chroma_snn_docs"
     )
     print("   ✓ Vectorstore loaded\n")
-    
-    # ============================================================
-    # STEP 2: MULTI-PASS RETRIEVAL (5 SEARCH STRATEGIES)
-    # ============================================================
-    
-    print("🔍 Multi-pass retrieval strategy:")
-    
-    # Define diverse search queries
-    search_queries = [
-        question,  # Original question (semantic match)
-        "snnTorch network architecture LIF neurons",  # Architecture patterns
-        "snnTorch encoder decoder spike",  # Encoding/decoding
-        "snnTorch training loss backward",  # Training methodology
-        "snnTorch recurrent network state"  # Recurrent patterns
-    ]
-    
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 20})
-    
-    snn_context = ""
-    retrieved_docs = {}
-    all_docs_count = 0
-    
-    for i, query in enumerate(search_queries, 1):
-        docs = retriever.get_relevant_documents(query)
-        retrieved_docs[query] = docs
-        all_docs_count += len(docs)
-        
-        print(f"   [{i}] Query: '{query[:50]}...' → {len(docs)} docs")
-        
-        # Add top 5 docs from each query to context
-        for j, doc in enumerate(docs[:5], 1):
-            source = doc.metadata.get("source", "unknown")
-            snn_context += f"[Query {i}.{j} - {source}]\n{doc.page_content[:600]}\n---\n"
-    
-    print(f"   Total retrieved: {all_docs_count} documents\n")
-    print(f"📊 Context size: {len(snn_context):,} characters\n")
-    
-    # ============================================================
-    # STEP 3: EXTRACT PATTERNS FROM DOCUMENTATION
-    # ============================================================
-    
-    print("📋 Extracting patterns from documentation...")
-    
-    patterns = {
-        "classes": [],
-        "functions": [],
-        "modules": [],
-        "examples": []
-    }
-    
-    import re
-    
-    # Extract class definitions
-    class_pattern = r"class\s+(\w+)\s*\("
-    patterns["classes"] = list(set(re.findall(class_pattern, snn_context)))
-    
-    # Extract function definitions  
-    func_pattern = r"def\s+(\w+)\s*\("
-    patterns["functions"] = list(set(re.findall(func_pattern, snn_context)))[:10]
-    
-    # Extract import statements
-    # CORRECT: Simple, clean regex
-    import_pattern = r"(?:import|from)\s+(\w+)"
-    imports = re.findall(import_pattern, snn_context)
-    patterns["modules"] = list(set(imports))
 
-    
-    print(f"   ✓ Classes found: {len(patterns['classes'])} - {patterns['classes'][:5]}")
-    print(f"   ✓ Functions found: {len(patterns['functions'])} - {patterns['functions'][:5]}")
-    print(f"   ✓ Modules found: {len(patterns['modules'])} - {patterns['modules'][:5]}\n")
-    
-    # ============================================================
-    # STEP 4: BUILD ENHANCED PROMPT WITH GROUNDING
-    # ============================================================
-    
-    print("📝 Building generation prompt with pattern grounding...\n")
-    
-    prompt = f"""You are a snnTorch code generation assistant with STRICT GROUNDING requirements.
+    # --- Helper: Safe JSON extraction ---
+    def safe_llm_json(content: str):
+        content = content.strip()
+        if content.startswith("```"):
+            content = re.sub(r"^```[a-zA-Z]*\n?", "", content)
+            content = re.sub(r"\n?```$", "", content)
+            content = content.strip()
+        return json.loads(content)
 
-        CRITICAL RULES - YOU MUST FOLLOW THESE:
-        1. Use ONLY the API, classes, and functions from the documentation excerpts below
-        2. Do NOT use any knowledge from your pretraining about snnTorch
-        3. If the documentation shows an API, use it EXACTLY as shown
-        4. If you cannot find information in documentation, return an ERROR
-        5. NEVER hallucinate function names, parameters, or APIs
-        6. Reference exact class names and function signatures from documentation
+    # STEP 2: Generate optimized multi-strategy search queries
+    print("🧠 Generating optimized search queries from LLM...")
 
-        ================================================================================
-        EXTRACTED PATTERNS FROM DOCUMENTATION:
-        ================================================================================
+    generate_prompt = f"""You are an expert at generating comprehensive search queries for the snnTorch library documentation.
 
-        Available Classes: {', '.join(patterns['classes'][:10])}
-        Available Functions: {', '.join(patterns['functions'][:10])}
-        Available Modules: {', '.join(patterns['modules'][:10])}
+User Question:
+{question}
 
-        ================================================================================
-        DOCUMENTATION EXCERPTS (Your ONLY source of truth):
-        ================================================================================
+Generate 10 diverse, focused search queries covering architecture, parameters, training, modules, and usage patterns.
 
-        {snn_context[:6000]}  # Limit to prevent token overflow
+Return ONLY a JSON array of query strings:
+["query1", "query2", ..., "query10"]
+"""
 
-        ================================================================================
-        USER REQUEST:
-        ================================================================================
-
-        {question}
-
-        ================================================================================
-        RESPONSE FORMAT:
-        ================================================================================
-
-        Respond with a single JSON object with these fields:
-        {{
-            "code": "Python code as string (raw, no markdown)",
-            "apis_used": ["list", "of", "actual", "APIs", "from", "documentation"],
-            "confidence": 0.95,
-            "notes": "Explain which documentation excerpts you used"
-        }}
-
-        CRITICAL - If you cannot complete the task using ONLY the provided documentation:
-        {{
-            "code": "ERROR: Insufficient documentation",
-            "missing": "Specify what information is missing",
-            "confidence": 0.0
-        }}
-
-        Return ONLY the JSON object.
-        """
-    
-    # ============================================================
-    # STEP 5: CALL LLM WITH GROUNDING
-    # ============================================================
-    
-    print("🤖 Calling LLM for code generation...")
-    
-    
-    
-    agent = Agent(
+    generate_agent = Agent(
         model=Ollama(id="gpt-oss:20b"),
         tools=[],
         show_tool_calls=False,
         use_json_mode=True,
     )
-    
-    response = agent.run(prompt)
-    print("   ✓ LLM generation complete\n")
-    
-    # ============================================================
-    # STEP 6: PARSE & VALIDATE RESPONSE
-    # ============================================================
-    
-    print("✓ Parsing and validating response...")
-    
+
     try:
-        content = json.loads(response.content) or {}
+        gen_response = generate_agent.run(generate_prompt)
+        queries = safe_llm_json(gen_response.content)
+        if not isinstance(queries, list) or len(queries) == 0:
+            raise ValueError("Empty or invalid query list generated")
+    except Exception as e:
+        print(f"⚠️ Query generation failed: {e}")
+        queries = [
+            question,
+            "snnTorch network architecture LIF neurons",
+            "snnTorch encoder decoder spike",
+            "snnTorch training loss backward",
+            "snnTorch recurrent network state",
+            "snnTorch forward pass parameters",
+            "snnTorch input data preprocessing",
+            "snnTorch model evaluation accuracy",
+            "snnTorch GPU CUDA performance",
+            "snnTorch examples tutorials"
+        ]
+
+    # STEP 3: Rank queries by relevance
+    print("🧠 Ranking generated queries by relevance...")
+
+    rank_prompt = f"""You are an expert at ranking search query relevance.
+
+User Question:
+{question}
+
+Candidate Queries:
+"""
+    for idx, q in enumerate(queries, 1):
+        rank_prompt += f"{idx}. {q}\n"
+
+    rank_prompt += """
+Your task: Rank these queries by RELEVANCE to answering the user's question.
+
+Return ONLY a JSON object:
+{
+  "ranked_queries": ["most_relevant_query", "second_most_relevant", ...],
+  "reasoning": "Brief explanation of ranking"
+}
+
+Focus on:
+- Core concepts mentioned in question
+- Implementation details needed
+- Training and evaluation requirements
+"""
+
+    rank_agent = Agent(
+        model=Ollama(id="gpt-oss:20b"),
+        tools=[],
+        show_tool_calls=False,
+        use_json_mode=True,
+    )
+
+    try:
+        rank_response = rank_agent.run(rank_prompt)
+        rank_result = safe_llm_json(rank_response.content)
+        ranked_queries = rank_result.get("ranked_queries", queries)
+        reasoning = rank_result.get("reasoning", "")
+        print(f"\n📊 Ranked Queries (reasoning: {reasoning}):")
+        for i, rq in enumerate(ranked_queries, 1):
+            print(f"  [{i}] {rq}")
+    except Exception as e:
+        print(f"⚠️ Ranking failed: {e}")
+        ranked_queries = queries
+
+    # STEP 4: Multi-pass retrieval with ranked queries
+    print("\n🔍 Executing multi-pass retrieval with ranked queries:")
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 20})
+
+    snn_context = ""
+    retrieved_docs = {}
+    total_docs = 0
+
+    for i, query in enumerate(ranked_queries, 1):
+        rank_score = 1.0 - (i - 1) * 0.05  # simple decay weighting
+        docs = retriever.get_relevant_documents(query)
+        retrieved_docs[query] = docs
+        total_docs += len(docs)
+        print(f"   [{i}] Query: '{query[:50]}...' → {len(docs)} docs (weight {rank_score:.2f})")
+        for j, doc in enumerate(docs[:5], 1):
+            source = doc.metadata.get("source", "unknown")
+            snn_context += f"[Query {i}.{j} - {source} - weight {rank_score:.2f}]\n{doc.page_content[:600]}\n---\n"
+
+    print(f"\n   Total retrieved: {total_docs} documents")
+    print(f"   Context size: {len(snn_context):,} characters\n")
+
+    # STEP 5: Extract patterns for prompt conditioning
+    patterns = {
+        "classes": list(set(re.findall(r"class\s+(\w+)\s*[:\(]", snn_context))),
+        "functions": list(set(re.findall(r"def\s+(\w+)\s*\(", snn_context)))[:10],
+        "modules": list(set(re.findall(r"(?:import|from)\s+([\w\.]+)", snn_context))),
+    }
+
+    print(f"   ✓ Classes: {len(patterns['classes'])} - {patterns['classes'][:5]}")
+    print(f"   ✓ Functions: {len(patterns['functions'])} - {patterns['functions'][:5]}")
+    print(f"   ✓ Modules: {len(patterns['modules'])} - {patterns['modules'][:5]}\n")
+
+    # STEP 6: Build prompt with ranked context
+    prompt = f"""You are a snnTorch code generation assistant.
+
+USER REQUEST: {question}
+
+RANKED DOCUMENTATION (most relevant first):
+
+{snn_context[:8000]}
+
+EXTRACTED PATTERNS:
+- Classes: {', '.join(patterns['classes'][:10])}
+- Functions: {', '.join(patterns['functions'][:10])}
+- Modules: {', '.join(patterns['modules'][:10])}
+
+Generate complete, working snnTorch code that addresses the request.
+
+Return JSON: {{"code": "...", "confidence": 0.95, "queries_used": 10}}
+"""
+
+    # STEP 7: Generate code with LLM
+    print("🤖 Calling LLM for code generation...")
+    gen_agent = Agent(
+        model=Ollama(id="gpt-oss:20b"),
+        tools=[],
+        show_tool_calls=False,
+        use_json_mode=True,
+    )
+
+    response = gen_agent.run(prompt)
+    print("   ✓ LLM generation complete\n")
+
+    # STEP 8: Parse and return
+    print("Raw LLM response:\n", response.content[:1000], "...\n")
+    print("✓ Parsing response...")
+
+    try:
+        content = safe_llm_json(response.content)
         code = content.get("code", "")
         confidence = content.get("confidence", 0.0)
-        apis_used = content.get("apis_used", [])
-        notes = content.get("notes", "")
-        
         print(f"   ✓ Confidence: {confidence*100:.0f}%")
-        print(f"   ✓ APIs used: {len(apis_used)} - {apis_used[:3]}")
-        print(f"   ✓ Notes: {notes[:100]}\n")
-        
-        # Validation checks
-        if "ERROR:" in code:
-            print(f"⚠️  WARNING: Agent reported insufficient documentation")
-            print(f"   {code}\n")
-        
-        if confidence < 0.5:
-            print(f"⚠️  WARNING: Low confidence ({confidence*100:.0f}%) - result may be inaccurate\n")
-        
-        # Verify APIs are from documentation
-        missing_apis = []
-        for api in apis_used:
-            if api not in patterns["classes"] and api not in patterns["functions"]:
-                missing_apis.append(api)
-        
-        if missing_apis:
-            print(f"⚠️  WARNING: Some APIs not found in documentation:")
-            print(f"   {missing_apis}\n")
-        
-    except json.JSONDecodeError as e:
-        print(f"   ❌ Error parsing JSON: {e}\n")
-        code = f"ERROR: Response parsing failed - {str(e)}"
-    
-    # ============================================================
-    # SUMMARY & RETURN
-    # ============================================================
-    
-    print("="*80)
-    print("✅ SNNTORCH AGENT COMPLETE")
-    print("="*80)
-    print(f"Retrieved: {all_docs_count} docs across {len(search_queries)} queries")
-    print(f"Code generated: {len(code)} characters")
-    if confidence > 0:
-        print(f"Confidence: {confidence*100:.0f}%\n")
-    
-    return {
-        "code": code,
-        "confidence": confidence,
-        "retrieved_docs": all_docs_count,
-        "search_queries": len(search_queries)
-    }
+        print(f"   ✓ Code length: {len(code)} characters\n")
+        return {"code": code, "confidence": confidence, "queries_used": 10}
+    except Exception as e:
+        print(f"   ❌ Semantic parse error: {e}\n")
+        return {"code": f"ERROR: {str(e)}", "confidence": 0.0, "queries_used": 10}
+
+
 
 
 
@@ -1209,82 +1402,92 @@ def snnTorch_agent(question: str, config: RunnableConfig, state: SummaryState):
 
 def nni_agent(question: str, config: RunnableConfig, state: SummaryState):
     """
-    Generates NNI experiment configuration with MULTI-PASS RETRIEVAL & VALIDATION.
-    
-    All inputs/outputs remain compatible.
+    Generates NNI experiment configuration with fine-tuned multi-pass retrieval and validation.
     """
-    
-    print("--- calling NNI AGENT (ENHANCED WITH MULTI-PASS RETRIEVAL) ---")
-    
-    # Step 1: Initialize vectorstore (same as before)
+
+    print("--- calling NNI AGENT (ENHANCED WITH LLM-GUIDED MULTI-STRATEGY RETRIEVAL) ---")
+
+    # Step 1: Initialize vectorstore
     embedding_model = SentenceTransformerEmbeddings("mchochlov/codebert-base-cd-ft")
     vectorstore = Chroma(
         embedding_function=embedding_model,
         collection_name="nni-docs",
         persist_directory="./chroma_nni_docs"
     )
-    
-    # ========================================
-    # KEY IMPROVEMENT 1: Multi-Pass Retrieval
-    # ========================================
-    
-    # Instead of single retrieval, use 5 search strategies
-    search_queries = [
-        question,  # Original question
-        f"NNI experiment search space hyperparameters",
-        "ExperimentConfig AlgorithmConfig LocalConfig",
-        "argparse command line arguments experiment",
-        "neural network training PyTorch"
-    ]
-    
+
+    # --- Step 2: LLM-Driven Adaptive Query Generation ---
+    # Generate adaptive, diverse search queries using an LLM guiding function similar to snnTorch_agent
+    search_queries = generate_optimized_search_queries(
+        user_question=question,
+        num_queries=10,
+        model_id="gpt-oss:20b"
+    )
+
+    # Fallback to defaults if generation fails
+    if not search_queries:
+        search_queries = [
+            question,
+            "NNI experiment search space hyperparameters",
+            "ExperimentConfig AlgorithmConfig LocalConfig",
+            "argparse command line arguments experiment",
+            "neural network training PyTorch"
+        ]
+
+    # Optional: Rank queries by relevance for prioritized retrieval
+    ranked_queries = rank_queries_by_relevance(
+        user_question=question,
+        generated_queries=search_queries,
+        model_id="gpt-oss:20b"
+    )
+
+    # --- Step 3: Multi-Pass Retrieval with ranked queries ---
     retriever = vectorstore.as_retriever(search_kwargs={"k": 15})
-    
+
     nni_context = ""
     retrieved_docs = {}
-    
-    print("🔍 Multi-pass retrieval:")
-    for i, query in enumerate(search_queries, 1):
+    total_docs = 0
+
+    print("🔍 Multi-pass retrieval with ranked queries:")
+
+    for i, query in enumerate(ranked_queries, 1):
         docs = retriever.get_relevant_documents(query)
         retrieved_docs[query] = docs
+        total_docs += len(docs)
+
         print(f"   [{i}] Query: '{query[:40]}...' → {len(docs)} docs")
-        
-        # Add top documents to context
-        for j, doc in enumerate(docs[:3], 1):  # Top 3 per query
-            nni_context += f"[Ref {i}.{j}]\n{doc.page_content[:800]}\n---\n"
-    
+
+        # Append top 3 docs per query to context (weighted by rank if desired)
+        for j, doc in enumerate(docs[:3], 1):
+            source = doc.metadata.get("source", "unknown")
+            nni_context += f"[Ref {i}.{j} - {source}]\n{doc.page_content[:800]}\n---\n"
+
     print(f"   Total context: {len(nni_context)} chars from {len(retrieved_docs)} queries")
-    
-    # ========================================
-    # KEY IMPROVEMENT 2: Extract Patterns
-    # ========================================
-    
-    # Extract structural patterns from references
+
+    # --- Step 4: Extract refined search space parameter patterns ---
     patterns = {
         "choice_params": [],
         "quniform_params": [],
         "min_params": 8
     }
-    
-    for query, docs in retrieved_docs.items():
+
+    import re
+
+    for docs in retrieved_docs.values():
         for doc in docs:
             content = doc.page_content
             if "'_type': 'choice'" in content:
-                import re
                 choices = re.findall(r"'(\w+)':\s*\{\s*'_type':\s*'choice'", content)
                 patterns["choice_params"].extend(choices)
             if "'_type': 'quniform'" in content:
-                quniform = re.findall(r"'(\w+)':\s*\{\s*'_type':\s*'quniform'", content)
-                patterns["quniform_params"].extend(quniform)
-    
+                quniforms = re.findall(r"'(\w+)':\s*\{\s*'_type':\s*'quniform'", content)
+                patterns["quniform_params"].extend(quniforms)
+
     patterns["choice_params"] = list(set(patterns["choice_params"]))
     patterns["quniform_params"] = list(set(patterns["quniform_params"]))
-    
-    print(f"📊 Patterns found: {len(patterns['choice_params'])} choice, {len(patterns['quniform_params'])} quniform")
-    
-    # ========================================
-    # KEY IMPROVEMENT 3: Enhanced Prompt
-    # ========================================
-    
+
+    print(f"📊 Extracted pattern counts: {len(patterns['choice_params'])} choice, {len(patterns['quniform_params'])} quniform")
+
+    # --- Step 5: Construct detailed prompt including refined context and validation info ---
     prompt = f"""You are an NNI configuration expert.
 
 TASK: Generate production-grade NNI Python configuration.
@@ -1301,52 +1504,54 @@ Minimum parameters needed: {patterns['min_params']}
 
 {nni_context[:3000]}
 
-=== REQUIREMENTS ===
+=== GENERATION REQUIREMENTS ===
 
-1. Generate COMPLETE Python script with:
-   - search_space dict (8+ hyperparameters, mix of choice and quniform)
-   - json.dump search_space to file
-   - argparse with 6+ arguments
-   - ExperimentConfig with tuner/assessor/training_service
-   - Experiment().run() lifecycle
-
+1. Generate COMPLETE Python script including:
+   - search_space dict with >=8 hyperparameters mixing choice and quniform types
+   - export search_space JSON to file before experiment start
+   - argparse setup with >=6 arguments
+   - ExperimentConfig with tuner, assessor, training service
+   - Experiment run lifecycle with proper class configuration
    
+2. Strictly NO YAML, no hardcoded values, no separate files
 
+3. Use AlgorithmConfig and LocalConfig exactly as in references
 
-2. Do NOT generate YAML, separate files, or hard-coded values
+4. Return ONLY JSON: {{\"code\": \"full script\", \"summary\": \"brief description\"}}
 
-3. Use AlgorithmConfig EXACTLY as shown in references
-
-4. Include LocalConfig with GPU settings
-
-5. Export search_space to JSON before starting experiment
-
-Return ONLY JSON:
-{{"code": "full Python script", "summary": "brief explanation"}}
 """
-    
-    # Step 4: Call LLM
+
+    # --- Step 6: Call LLM and validate output ---
     agent = Agent(
         model=Ollama(id="gpt-oss:20b"),
         tools=[],
         show_tool_calls=False,
         use_json_mode=True,
     )
-    
+
     response = agent.run(prompt)
     print(f"✓ LLM generation complete ({len(response.content)} chars)")
     
-    # ========================================
-    # KEY IMPROVEMENT 4: Validate Output
-    # ========================================
-    
+
     try:
-        content = json.loads(response.content or "{}")
-        code = content.get("code", "")
-    except json.JSONDecodeError:
+        import json, re
+        content = response.content.strip()
+        print("Raw LLM response:\n", content, "\n")
+
+        # Strip code fences if present (```json ... ```)
+        if content.startswith("```"):
+            content = re.sub(r"^```[a-zA-Z]*\n?", "", content)
+            content = re.sub(r"\n?```$", "", content)
+            content = content.strip()
+
+        parsed = json.loads(content or "{}")
+        code = parsed.get("code", "")
+    except Exception as e:
         code = ""
-    
-    # Simple validation checks
+        print(f"⚠️ JSON parse failed: {e}")
+
+
+    # --- Step 7: Enhanced validation specific to principal query ---
     validation_checks = {
         "has_search_space": "search_space" in code,
         "has_argparse": "ArgumentParser" in code,
@@ -1354,21 +1559,25 @@ Return ONLY JSON:
         "has_local_config": "LocalConfig" in code,
         "has_json_export": "json.dump" in code,
         "has_nni_integration": "Experiment(" in code,
-        "has_minimum_params": len(patterns['choice_params']) + len(patterns['quniform_params']) >= 8
+        "has_minimum_params": (len(patterns["choice_params"]) + len(patterns["quniform_params"])) >= 8,
+        # Add if question mentions certain keywords, check for related code
+        "handles_noise": "noise" in question.lower() and ("noise" in code or "regularization" in code or "augmentation" in code),
+        "has_argparse_parameters": code.count("add_argument") >= 6,
     }
-    
-    passed = sum(1 for v in validation_checks.values() if v)
+
+    passed = sum(v for v in validation_checks.values())
     score = int((passed / len(validation_checks)) * 100)
-    
+
     print(f"✓ Validation score: {score}% ({passed}/{len(validation_checks)} checks passed)")
-    for check, result in validation_checks.items():
-        status = "✅" if result else "❌"
-        print(f"   {status} {check}")
-    
+    for key, val in validation_checks.items():
+        status = "✅" if val else "❌"
+        print(f"   {status} {key}")
+
     if score < 50:
         print("⚠️  WARNING: Low validation score - generated code may have issues")
-    
+
     return {"code": code}
+
 
 
 
@@ -2097,7 +2306,7 @@ def upload_and_execute_in_e2b(
                         cmd = "pip install --no-cache-dir tensorflow-cpu"
                     elif package.lower() in ["opencv", "cv2"]:
                         cmd = "pip install opencv-python-headless"
-                    elif package.lower() in ["os", "sys", "json", "re", "datetime"]:
+                    elif package.lower() in ["os", "sys", "json", "re", "datetime", "time"]:
                         if verbose:
                             print("(built-in)")
                         continue
