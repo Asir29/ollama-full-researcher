@@ -1400,183 +1400,371 @@ Return JSON: {{"code": "...", "confidence": 0.95, "queries_used": 10}}
 # IMPROVED NNI_AGENT FUNCTION ONLY - DROP-IN REPLACEMENT
 # ============================================================================
 
+
 def nni_agent(question: str, config: RunnableConfig, state: SummaryState):
     """
-    Generates NNI experiment configuration with fine-tuned multi-pass retrieval and validation.
+    Generates NNI experiment configuration with FULLY INTEGRATED response parsing.
+    Everything is inline - no separate helper functions.
+    Uses the EXACT SAME PATTERN as snnTorch agent.
     """
+    
+    print("=" * 80)
+    print("NNI AGENT - WITH INTEGRATED PARSING")
+    print("=" * 80)
+    
+    # ============================================================
+    # STEP 1: Initialize vectorstore
+    # ============================================================
+    
+    try:
+        embedding_model = SentenceTransformerEmbeddings("mchochlov/codebert-base-cd-ft")
+    except:
+        embedding_model = SentenceTransformerEmbeddings("all-MiniLM-L6-v2")
+    
+    try:
+        vectorstore = Chroma(
+            embedding_function=embedding_model,
+            collection_name="nni-docs",
+            persist_directory="./chroma_nni_docs"
+        )
+        print("[NNI] ✓ Vectorstore initialized")
+    except Exception as e:
+        print(f"[NNI] ⚠️ Warning: Could not load vectorstore: {e}")
+        vectorstore = None
+    
+    # ============================================================
+    # STEP 2: Generate optimized search queries (INLINE)
+    # ============================================================
+    
+    print("[NNI] Generating optimized search queries...")
+    
+    query_generation_prompt = f"""You are an expert at generating comprehensive search queries for NNI documentation retrieval.
 
-    print("--- calling NNI AGENT (ENHANCED WITH LLM-GUIDED MULTI-STRATEGY RETRIEVAL) ---")
+Your task: Given a user's question, generate 10 DIVERSE, SPECIFIC search queries that will retrieve all relevant documentation needed to answer the question.
 
-    # Step 1: Initialize vectorstore
-    embedding_model = SentenceTransformerEmbeddings("mchochlov/codebert-base-cd-ft")
-    vectorstore = Chroma(
-        embedding_function=embedding_model,
-        collection_name="nni-docs",
-        persist_directory="./chroma_nni_docs"
+Requirements:
+1. Each query should target a DIFFERENT aspect of the problem
+2. Queries should be specific (include NNI concepts, parameter names, concrete patterns)
+3. Order queries by importance (most critical first)
+4. Avoid duplicate queries
+5. Cover configuration, search spaces, tuning strategies, and training integration
+
+User Question: {question}
+
+Format: Return ONLY a JSON array of query strings:
+["query1", "query2", "query3", ...]
+"""
+    
+    generate_agent = Agent(
+        model=Ollama(id="gpt-oss:20b"),
+        tools=[],
+        show_tool_calls=False,
+        use_json_mode=True,
     )
-
-    # --- Step 2: LLM-Driven Adaptive Query Generation ---
-    # Generate adaptive, diverse search queries using an LLM guiding function similar to snnTorch_agent
-    search_queries = generate_optimized_search_queries(
-        user_question=question,
-        num_queries=10,
-        model_id="gpt-oss:20b"
-    )
-
-    # Fallback to defaults if generation fails
-    if not search_queries:
+    
+    search_queries = []
+    try:
+        gen_response = generate_agent.run(query_generation_prompt)
+        # ✓ KEY: Always extract .content first (LIKE snnTorch)
+        gen_content = gen_response.content.strip()
+        if gen_content.startswith('```'):
+            gen_content = re.sub(r'```[a-zA-Z]*', '', gen_content)
+            gen_content = re.sub(r'```', '', gen_content)
+            gen_content = gen_content.strip()
+        search_queries = json.loads(gen_content)
+        
+        if not isinstance(search_queries, list) or len(search_queries) == 0:
+            raise ValueError("Empty or invalid query list")
+        
+        print(f"[NNI] ✓ Generated {len(search_queries)} search queries")
+        for i, q in enumerate(search_queries, 1):
+            print(f"  [{i}] {q[:60]}...")
+    
+    except Exception as e:
+        print(f"[NNI] ❌ Query generation failed: {e}")
         search_queries = [
-            question,
-            "NNI experiment search space hyperparameters",
-            "ExperimentConfig AlgorithmConfig LocalConfig",
-            "argparse command line arguments experiment",
-            "neural network training PyTorch"
+            "NNI experiment config YAML example using TPE tuner total_trials 20 parallel_trials 2 time_limit 2h",
+            "NNI TPE tuner search space definition learning_rate categorical [0.0001,0.0005,0.001,0.01]",
+            "NNI TPE tuner search space batch_size integer [32,64,128,256]",
+            "NNI TPE tuner search space hidden_units integer [64,128,256,512]",
+            "NNI uniform search space dropout_rate 0.1-0.5 example definition",
+            "NNI uniform search space weight_decay 0.0-0.01 example definition",
+            "Using nni.get_next_parameter() in train.py to load hyperparameters",
+            "Reporting epoch accuracy to NNI via nni.report_intermediate_result in train.py",
+            "Integrating model.py with NNI hyperparameters and training loop",
+            "NNI tuning workflow architecture: tuner, trainer, experiment, search space overview"
         ]
+    
+    # ============================================================
+    # STEP 3: Rank queries by relevance (INLINE)
+    # ============================================================
+    
+    print("[NNI] Ranking queries by relevance...")
+    
+    ranking_prompt = f"""You are an expert at ranking search query relevance.
 
-    # Optional: Rank queries by relevance for prioritized retrieval
-    ranked_queries = rank_queries_by_relevance(
-        user_question=question,
-        generated_queries=search_queries,
-        model_id="gpt-oss:20b"
+User Question: {question}
+
+Candidate Queries:
+"""
+    for i, query in enumerate(search_queries, 1):
+        ranking_prompt += f"{i}. {query}\n"
+    
+    ranking_prompt += """Your task: Rank these queries by RELEVANCE to answering the user's question.
+
+Return ONLY a JSON object:
+{
+  "ranked_queries": ["most_relevant_query", "second_most_relevant", ...],
+  "reasoning": "Brief explanation of ranking"
+}
+
+Focus on:
+- Core NNI concepts mentioned in the question
+- Implementation details needed
+- Configuration and training requirements
+"""
+    
+    rank_agent = Agent(
+        model=Ollama(id="gpt-oss:20b"),
+        tools=[],
+        show_tool_calls=False,
+        use_json_mode=True,
     )
-
-    # --- Step 3: Multi-Pass Retrieval with ranked queries ---
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 15})
-
+    
+    ranked_queries = search_queries
+    try:
+        rank_response = rank_agent.run(ranking_prompt)
+        # ✓ KEY: Always extract .content first (LIKE snnTorch)
+        rank_content = rank_response.content.strip()
+        if rank_content.startswith('```'):
+            rank_content = re.sub(r'```[a-zA-Z]*', '', rank_content)
+            rank_content = re.sub(r'```', '', rank_content)
+            rank_content = rank_content.strip()
+        rank_result = json.loads(rank_content)
+        ranked_queries = rank_result.get("ranked_queries", search_queries)
+        reasoning = rank_result.get("reasoning", "")
+        
+        print(f"[NNI] ✓ Ranked {len(ranked_queries)} queries")
+        print(f"[NNI] Reasoning: {reasoning}")
+        for i, q in enumerate(ranked_queries, 1):
+            print(f"  [{i}] {q[:60]}...")
+    
+    except Exception as e:
+        print(f"[NNI] ❌ Ranking failed: {e}")
+        ranked_queries = search_queries
+    
+    # ============================================================
+    # STEP 4: Multi-pass retrieval from vectorstore (INLINE)
+    # ============================================================
+    
     nni_context = ""
-    retrieved_docs = {}
     total_docs = 0
+    
+    if vectorstore:
+        print("[NNI] Performing multi-pass retrieval...")
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 15})
+        
+        for i, query in enumerate(ranked_queries, 1):
+            try:
+                docs = retriever.get_relevant_documents(query)
+                total_docs += len(docs)
+                print(f"[NNI]    {i}. Query: {query[:40]}... → {len(docs)} docs")
+                
+                for j, doc in enumerate(docs[:3], 1):
+                    source = doc.metadata.get("source", "unknown")
+                    nni_context += f"\n[Ref {i}.{j} - {source}]\n{doc.page_content[:800]}\n---"
+            
+            except Exception as e:
+                print(f"[NNI] ⚠️ Error retrieving documents for query {i}: {e}")
+        
+        print(f"[NNI] ✓ Total context: {len(nni_context)} chars from {len(ranked_queries)} queries")
+    
+    # ============================================================
+    # STEP 5: Extract patterns from context (INLINE)
+    # ============================================================
+    
+    print("[NNI] Extracting patterns from context...")
+    
+    patterns_choice = list(set(re.findall(r"'_type':\s*'choice'[^}]*\[([^\]]+)\]", nni_context)))[:5]
+    patterns_quniform = list(set(re.findall(r"'_type':\s*'quniform'[^}]*\[([^\]]+)\]", nni_context)))[:5]
 
-    print("🔍 Multi-pass retrieval with ranked queries:")
-
-    for i, query in enumerate(ranked_queries, 1):
-        docs = retriever.get_relevant_documents(query)
-        retrieved_docs[query] = docs
-        total_docs += len(docs)
-
-        print(f"   [{i}] Query: '{query[:40]}...' → {len(docs)} docs")
-
-        # Append top 3 docs per query to context (weighted by rank if desired)
-        for j, doc in enumerate(docs[:3], 1):
-            source = doc.metadata.get("source", "unknown")
-            nni_context += f"[Ref {i}.{j} - {source}]\n{doc.page_content[:800]}\n---\n"
-
-    print(f"   Total context: {len(nni_context)} chars from {len(retrieved_docs)} queries")
-
-    # --- Step 4: Extract refined search space parameter patterns ---
-    patterns = {
-        "choice_params": [],
-        "quniform_params": [],
-        "min_params": 8
-    }
-
-    import re
-
-    for docs in retrieved_docs.values():
-        for doc in docs:
-            content = doc.page_content
-            if "'_type': 'choice'" in content:
-                choices = re.findall(r"'(\w+)':\s*\{\s*'_type':\s*'choice'", content)
-                patterns["choice_params"].extend(choices)
-            if "'_type': 'quniform'" in content:
-                quniforms = re.findall(r"'(\w+)':\s*\{\s*'_type':\s*'quniform'", content)
-                patterns["quniform_params"].extend(quniforms)
-
-    patterns["choice_params"] = list(set(patterns["choice_params"]))
-    patterns["quniform_params"] = list(set(patterns["quniform_params"]))
-
-    print(f"📊 Extracted pattern counts: {len(patterns['choice_params'])} choice, {len(patterns['quniform_params'])} quniform")
-
-    # --- Step 5: Construct detailed prompt including refined context and validation info ---
+    
+    print(f"[NNI]    ✓ Found {len(patterns_choice)} choice patterns")
+    print(f"[NNI]    ✓ Found {len(patterns_quniform)} quniform patterns")
+    
+    # ============================================================
+    # STEP 6: Build generation prompt (INLINE)
+    # ============================================================
+    
+    print("[NNI] Building generation prompt...")
+    
     prompt = f"""You are an NNI configuration expert.
 
 TASK: Generate production-grade NNI Python configuration.
 
 USER REQUEST: {question}
 
-=== REFERENCE PATTERNS ===
-
-Search space parameters (choice): {patterns['choice_params'][:5]}
-Search space parameters (quniform): {patterns['quniform_params'][:5]}
-Minimum parameters needed: {patterns['min_params']}
-
-=== REFERENCE CODE ===
-
+REFERENCE DOCUMENTATION (most relevant first):
 {nni_context[:3000]}
 
-=== GENERATION REQUIREMENTS ===
+GENERATION REQUIREMENTS:
+1. Generate COMPLETE Python scripts with TWO sections:
 
-1. Generate COMPLETE Python script including:
-   - search_space dict with >=8 hyperparameters mixing choice and quniform types
-   - export search_space JSON to file before experiment start
-   - argparse setup with >=6 arguments
-   - ExperimentConfig with tuner, assessor, training service
-   - Experiment run lifecycle with proper class configuration
-   
-2. Strictly NO YAML, no hardcoded values, no separate files
+   SECTION 1 (config.py):
+   - Define search_space dict with 8 hyperparameters (mix choice and quniform)
+   - Export search_space to JSON file before experiment
+   - Set up argparse with 6 arguments
+   - Create ExperimentConfig with tuner, assessor, training_service
+   - Use AlgorithmConfig for TPE tuner and assessor
+   - Use LocalConfig for GPU execution
 
-3. Use AlgorithmConfig and LocalConfig exactly as in references
+   SECTION 2 (train.py):
+   - Use nni.get_next_parameter() (v2.0 API)
+   - Retrieve all 8 hyperparameters
+   - Implement complete training loop with validation
+   - Report intermediate results with nni.report_intermediate_result()
+   - Report final result with nni.report_final_result()
+   - Include argparse integration
+   - Load MNIST data
+   - Define PyTorch model
+   - Full training with optimizer and scheduler
 
-4. Return ONLY JSON: {{\"code\": \"full script\", \"summary\": \"brief description\"}}
+2. FORMAT OUTPUT:
+   - Start each file with: FILE filename.py
+   - Include complete, working Python code
+   - NO YAML, NO hardcoded values, NO separate files
+   - Strictly follow NNI v2.0 API
 
+3. RETURN ONLY JSON:
+   {{
+     "code": "FILE config.py\\n...complete code...\\nFILE train.py\\n...complete code...",
+     "summary": "Brief description of generated configuration"
+   }}
+
+NO MARKDOWN, NO EXPLANATIONS - ONLY VALID JSON WITH CODE KEY.
 """
-
-    # --- Step 6: Call LLM and validate output ---
-    agent = Agent(
+    
+    print("[NNI] ✓ Prompt ready")
+    
+    # ============================================================
+    # STEP 7: Call LLM for code generation (INLINE WITH FIX)
+    # ============================================================
+    
+    print("[NNI] Calling LLM for code generation...")
+    
+    code_agent = Agent(
         model=Ollama(id="gpt-oss:20b"),
         tools=[],
         show_tool_calls=False,
         use_json_mode=True,
     )
-
-    response = agent.run(prompt)
-    print(f"✓ LLM generation complete ({len(response.content)} chars)")
     
-
+    response_text = ""
     try:
-        import json, re
-        content = response.content.strip()
-        print("Raw LLM response:\n", content, "\n")
-
-        # Strip code fences if present (```json ... ```)
-        if content.startswith("```"):
-            content = re.sub(r"^```[a-zA-Z]*\n?", "", content)
-            content = re.sub(r"\n?```$", "", content)
-            content = content.strip()
-
-        parsed = json.loads(content or "{}")
-        code = parsed.get("code", "")
+        response = code_agent.run(prompt)
+        # ✓ CRITICAL FIX: Always access .content first (LIKE snnTorch)
+        response_text = response.content
+        print(f"[NNI] ✓ LLM response received ({len(response_text)} chars)")
+    
     except Exception as e:
-        code = ""
-        print(f"⚠️ JSON parse failed: {e}")
-
-
-    # --- Step 7: Enhanced validation specific to principal query ---
+        print(f"[NNI] ❌ LLM call failed: {e}")
+        return {"code": "", "error": str(e)}
+    
+    # ============================================================
+    # STEP 8: Parse response with integrated extraction (INLINE)
+    # ============================================================
+    
+    print("[NNI] Parsing response...")
+    
+    code = ""
+    try:
+        # ✓ CRITICAL FIX: Use safe JSON extraction (LIKE snnTorch)
+        parse_content = response_text.strip()
+        if parse_content.startswith('```'):
+            parse_content = re.sub(r'```[a-zA-Z]*', '', parse_content)
+            parse_content = re.sub(r'```', '', parse_content)
+            parse_content = parse_content.strip()
+        
+        response_data = json.loads(parse_content)
+        code = response_data.get("code", "")
+        
+        if not code:
+            print("[NNI] ⚠️ No code in response")
+            return {"code": "", "error": "Empty code in response"}
+        
+        print(f"[NNI] ✓ Extracted code: {len(code)} chars")
+    
+    except json.JSONDecodeError as e:
+        print(f"[NNI] ❌ JSON parse error: {e}")
+        print(f"[NNI] Response text: {response_text[:500]}")
+        return {"code": "", "error": str(e)}
+    
+    # ============================================================
+    # STEP 9: Unescape newlines and handle escaping (INLINE)
+    # ============================================================
+    
+    print("[NNI] Unescaping newlines...")
+    
+    code = code.replace("\\n", "\n")
+    code = code.replace("\\t", "\t")
+    code = code.replace('\\"', '"')
+    print(f"[NNI] ✓ Code unescaped: {len(code)} chars")
+    
+    # ============================================================
+    # STEP 10: Validate extracted code (INLINE)
+    # ============================================================
+    
+    print("[NNI] Validating extracted code...")
+    
     validation_checks = {
-        "has_search_space": "search_space" in code,
-        "has_argparse": "ArgumentParser" in code,
+        "has_file_markers": "FILE" in code,
+        "has_search_space": "search_space" in code and "_type" in code,
+        "has_nni_integration": "nni.get_next_parameter" in code,
         "has_experiment_config": "ExperimentConfig" in code,
-        "has_local_config": "LocalConfig" in code,
-        "has_json_export": "json.dump" in code,
-        "has_nni_integration": "Experiment(" in code,
-        "has_minimum_params": (len(patterns["choice_params"]) + len(patterns["quniform_params"])) >= 8,
-        # Add if question mentions certain keywords, check for related code
-        "handles_noise": "noise" in question.lower() and ("noise" in code or "regularization" in code or "augmentation" in code),
-        "has_argparse_parameters": code.count("add_argument") >= 6,
+        "has_training_loop": "for epoch" in code or "for batch" in code,
+        "has_torch_import": "import torch" in code,
     }
-
-    passed = sum(v for v in validation_checks.values())
-    score = int((passed / len(validation_checks)) * 100)
-
-    print(f"✓ Validation score: {score}% ({passed}/{len(validation_checks)} checks passed)")
-    for key, val in validation_checks.items():
-        status = "✅" if val else "❌"
-        print(f"   {status} {key}")
-
-    if score < 50:
-        print("⚠️  WARNING: Low validation score - generated code may have issues")
-
-    return {"code": code}
+    
+    passed = sum(1 for v in validation_checks.values() if v)
+    total = len(validation_checks)
+    score = int(100 * passed / total)
+    
+    print(f"[NNI] Validation score: {score}% ({passed}/{total} checks passed)")
+    
+    for check_name, result in validation_checks.items():
+        status = "✓" if result else "✗"
+        print(f"[NNI] {status} {check_name}")
+    
+    # ============================================================
+    # STEP 11: Extract FILE sections (INLINE)
+    # ============================================================
+    
+    print("[NNI] Extracting FILE sections...")
+    
+    pattern = r"FILE\s+(\S+\.py)\s*\n(.*?)(?=FILE|\Z)"
+    matches = list(re.finditer(pattern, code, re.DOTALL | re.MULTILINE))
+    
+    files = {}
+    for i, match in enumerate(matches, 1):
+        filename = match.group(1)
+        file_content = match.group(2).strip()
+        files[filename] = file_content
+        print(f"[NNI] {i}. {filename} - {len(file_content)} chars")
+    
+    if not files:
+        print("[NNI] ⚠️ No FILE sections found, returning code as-is")
+        files["generated_code.py"] = code
+    
+    print("=" * 80)
+    print("NNI AGENT COMPLETE")
+    print("=" * 80)
+    
+    return {
+        "code": code,
+        "validation_score": score,
+        "checks": validation_checks,
+        "files": files,
+    }
 
 
 
@@ -2360,10 +2548,16 @@ def upload_and_execute_in_e2b(
             print("="*80)
             print()
         
+        # exec_result = sandbox.commands.run(
+        #     f"cd {upload_dir} && python {main_file}",
+        #     timeout_ms=timeout_ms
+        # )
+
         exec_result = sandbox.commands.run(
-            f"cd {upload_dir} && python {main_file}",
-            timeout_ms=timeout_ms
+        f"python -c \"import sys; sys.path.insert(0, '/home/user'); exec(open('/home/user/{mainfile}').read())\"",
+        timeout_ms=timeout_ms
         )
+
         
         if verbose:
             print("="*80)
