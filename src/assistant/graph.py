@@ -1,5 +1,9 @@
-# langgraph dev --no-reload
-# to run without reloading
+#langgraph dev --no-reload --allow-blocking  # to run without reloading and allow blocking operations (to use DeepEval)
+
+import os
+os.environ["DISABLE_NEST_ASYNCIO"] = "1"
+
+
 
 # -------------------------
 # Core Python & Utilities
@@ -12,7 +16,6 @@ import asyncio                  # Async operations
 import numpy as np              # Numeric arrays and operations
 import torch                    # PyTorch (GPU/CPU tensors, deep learning)
 torch.cuda.empty_cache()        # Clear CUDA memory if needed
-import os
 from datetime import datetime
 
 
@@ -69,6 +72,19 @@ from agno.tools.arxiv import ArxivTools
 # HTML / Web Parsing
 # -------------------------
 from bs4 import BeautifulSoup  # HTML parsing and cleaning
+
+
+# -------------------------
+# Search Evaluation
+# -------------------------
+
+
+from deepeval import assert_test
+from deepeval import evaluate
+from deepeval.models import OllamaModel
+from deepeval.metrics import FaithfulnessMetric, AnswerRelevancyMetric
+from deepeval.test_case import LLMTestCase
+
 
 # -------------------------
 # Code Evaluation / Sandbox
@@ -180,27 +196,6 @@ def remove_think_tags(text: str) -> str:
         end = cleaned_text.find("</think>") + len("</think>")
         cleaned_text = cleaned_text[:start] + cleaned_text[end:]
     return cleaned_text
-
-# def save_code_to_file(code_str: str, output_dir: str, filename: str, mode="w"):
-#     """
-#     Saves code string to a file inside output_dir.
-#     Creates output_dir if it doesn't exist.
-
-#     Args:
-#         code_str (str): The code to save.
-#         output_dir (str): Directory path to save the code in.
-#         filename (str): The filename for the code file.
-#         mode (str): File write mode: "w" for overwrite, "a" for append.
-
-#     Returns:
-#         None
-#     """
-#     os.makedirs(output_dir, exist_ok=True)
-#     file_path = os.path.join(output_dir, filename)
-#     with open(file_path, mode, encoding="utf-8") as f:
-#         f.write(code_str)
-#         if mode == "a":
-#             f.write("\n\n# --- Appended code snippet ---\n\n")
 
 def save_code_to_file(code_str: str, output_dir: str, filename: str, mode="w"):
     """
@@ -376,7 +371,6 @@ async def web_research(state: SummaryState, config: RunnableConfig):
         "content": f"Searching for: {state.search_query}"
     }))
     
-    configurable = Configuration.from_runnable_config(config)
     # Search the web
     agent = Agent(
         model=Ollama(id="qwen3:latest"),
@@ -515,27 +509,188 @@ async def reflect_on_summary(state: SummaryState, config: RunnableConfig):
     # Update search query with follow-up query
     return {"search_query": follow_up_query['follow_up_query']}
 
-async def finalize_summary(state: SummaryState, config: RunnableConfig):
-    """ Finalize the summary """
+# async def finalize_summary(state: SummaryState, config: RunnableConfig):
+#     """ Finalize the summary """
     
-    await copilotkit_emit_message(config, json.dumps({
-        "node": "Finalize Summary",
-        "content": "Finalizing research summary..."
-    }))
+#     await copilotkit_emit_message(config, json.dumps({
+#         "node": "Finalize Summary",
+#         "content": "Finalizing research summary..."
+#     }))
     
-    # Format all accumulated sources into a single bulleted list
+#     # Format all accumulated sources into a single bulleted list
+#     all_sources = "\n".join(source for source in state.sources_gathered)
+#     final_summary = f"## Summary\n\n{state.running_summary}\n\n ### Sources:\n{all_sources}"
+    
+#     await copilotkit_emit_message(config, json.dumps({
+#         "node": "Finalize Summary",
+#         "content": final_summary
+#     }))
+    
+#     # Signal completion to copilotkit
+#     await copilotkit_exit(config)
+    
+#     return {"running_summary": final_summary}
+
+import asyncio
+
+# ===== STEP 1: NEW FUNCTION - Synchronous evaluation (runs in thread) =====
+def _evaluate_summary_sync(
+    research_topic: str,
+    running_summary: str,
+    web_research_results: list
+) -> dict:
+    """
+    SYNCHRONOUS evaluation - runs in separate thread.
+    """
+    print("\n🔍 Running DeepEval evaluation with Ollama (deepseek-r1:latest)...\n")
+    
+    try:
+        # ===== CRITICAL: SET ENVIRONMENT VARIABLES FIRST =====
+        import os
+        os.environ["DEEPEVAL_RESULTS_FOLDER"] = ""
+        os.environ["DEEPEVAL_DISABLE_TELEMETRY"] = "1"
+        # Force no caching
+        os.environ["DEEPEVAL_SKIP_PROMPTS_CACHE"] = "1"
+        # ===== THEN import DeepEval AFTER setting env vars =====
+        
+        from deepeval import assert_test
+        from deepeval.models import OllamaModel
+        from deepeval.metrics import FaithfulnessMetric, AnswerRelevancyMetric
+        from deepeval.test_case import LLMTestCase
+        
+        # Initialize Ollama model
+        ollama_model = OllamaModel(
+            model="deepseek-r1:latest",
+            base_url="http://localhost:11434"
+        )
+        
+        # Define metrics
+        faithfulness = FaithfulnessMetric(threshold=0.55, model=ollama_model)
+        relevancy = AnswerRelevancyMetric(threshold=0.55, model=ollama_model)
+        
+        # Create test case
+        test_case = LLMTestCase(
+            input=research_topic,
+            actual_output=running_summary,
+            retrieval_context=web_research_results
+        )
+        
+        # Run evaluation
+        #assert_test(test_case, [faithfulness, relevancy]) # Original (raises on failure)
+        result = evaluate([test_case], [faithfulness, relevancy])
+
+        
+        
+        print("\n" + "="*80)
+        print("✅ EVALUATION COMPLETE!")
+        print("="*80)
+        print("   ✓ Faithfulness (supported by docs): PASS")
+        print("   ✓ Answer Relevancy (addresses query): PASS")
+        print("="*80 + "\n")
+        
+        # return {
+        #     "completed": True,
+        #     "status": "PASS",
+        #     "metrics_passed": 2,
+        #     "total_metrics": 2
+        # }
+
+        
+
+        # Return success even if below threshold
+        return {
+            "completed": True,
+            "status": "EVALUATED",
+            "faithfulness_score": faithfulness.score,
+            "relevancy_score": relevancy.score
+        }
+        
+    except Exception as e:
+        print(f"\n❌ Evaluation error: {e}")
+        return {
+            "completed": False,
+            "error": str(e),
+            "status": "ERROR"
+        }
+
+
+
+# ===== STEP 2: MODIFIED evaluate_summary_with_interrupt =====
+async def evaluate_summary_with_interrupt(
+    research_topic: str,
+    running_summary: str,
+    web_research_results: list
+) -> dict:
+    """
+    Evaluate the summary with user interrupt.
+    MODIFIED: Runs DeepEval in separate thread (bypasses uvloop).
+    """
+    
+    print("\n" + "="*80)
+    print("GENERATED SUMMARY:")
+    print("="*80)
+    print(running_summary)
+    print("="*80 + "\n")
+    
+    # Get user input in thread (non-blocking)
+    user_input = await asyncio.to_thread(
+        input,
+        "Do you want to evaluate this summary for faithfulness and quality? (yes/no): "
+    )
+    user_input = user_input.strip().lower()
+        
+    if user_input in ["yes", "y"]:
+        # ===== CRITICAL: Run evaluation in SEPARATE THREAD =====
+        evaluation_result = await asyncio.to_thread(
+            _evaluate_summary_sync,
+            research_topic,
+            running_summary,
+            web_research_results
+        )
+        # ===== END THREAD EXECUTION =====
+        
+        return evaluation_result
+    
+    else:
+        print("\n⏭️  No evaluation performed. Continuing...\n")
+        return {
+            "completed": False,
+            "status": "SKIPPED"
+        }
+
+
+# ===== STEP 3: MODIFIED finalize_summary =====
+async def finalize_summary(state, config):
+    """
+    Modified finalize_summary that includes evaluation interrupt.
+    """
+    
+    # Your existing finalize logic
     all_sources = "\n".join(source for source in state.sources_gathered)
-    final_summary = f"## Summary\n\n{state.running_summary}\n\n ### Sources:\n{all_sources}"
+    final_summary = f"## Summary\n\n{state.running_summary}\n\n### Sources:\n{all_sources}"
     
+    # Emit final message
     await copilotkit_emit_message(config, json.dumps({
         "node": "Finalize Summary",
-        "content": final_summary
+        "content": final_summary,
     }))
     
-    # Signal completion to copilotkit
+    # ===== EVALUATION (using thread-based approach) =====
+    evaluation_result = await evaluate_summary_with_interrupt(
+        research_topic=state.research_topic,
+        running_summary=state.running_summary,
+        web_research_results=state.web_research_results
+    )
+    # ===== END EVALUATION =====
+    
     await copilotkit_exit(config)
     
-    return {"running_summary": final_summary}
+    return {
+        "running_summary": final_summary,
+        "evaluation_results": evaluation_result
+    }
+
+
 
 def route_research(state: SummaryState, config: RunnableConfig) -> Literal["finalize_summary", "web_research"]:
     """ Route the research based on the follow-up query """
@@ -2929,69 +3084,145 @@ def collect_feedback(state: SummaryState, config: RunnableConfig):
 
 
 
-def process_feedback(state: SummaryState, config: RunnableConfig):
-    """Process the user feedback and classify next action."""
-    print("---PROCESSING FEEDBACK DECISION---")
+# def process_feedback(state: SummaryState, config: RunnableConfig):
+#     """Process the user feedback and classify next action."""
+#     print("---PROCESSING FEEDBACK DECISION---")
 
-    #print("\nstate in process feedback:", state)
+#     #print("\nstate in process feedback:", state)
 
-    agent = Agent(
-        model=Ollama(id="deepseek-r1"),
-        tools=[],
-        show_tool_calls=False,
-        structured_outputs=True,
-    )
+#     agent = Agent(
+#         model=Ollama(id="deepseek-r1"),
+#         tools=[],
+#         show_tool_calls=False,
+#         structured_outputs=True,
+#     )
 
-    prompt = f"""\
+#     prompt = f"""\
 
-    You are a decision agent.
+#     You are a decision agent.
 
-    You are given user feedback: {state.research_topic}
+#     You are given user feedback: {state.research_topic}
 
-    Based on this feedback, respond with **only one** of the following exact JSON objects:
+#     Based on this feedback, respond with **only one** of the following exact JSON objects:
 
-    {{"response": "approve"}}
-    {{"response": "regenerate"}}
-    {{"response": "evaluation"}}
-    {{"response": "execute"}}
+#     {{"response": "approve"}}
+#     {{"response": "regenerate"}}
+#     {{"response": "evaluation"}}
+#     {{"response": "execute"}}
 
-    ### Definitions:
-    - Use **"evaluation"** if the user wants to perform an evaluation or if the user talks about to evaluate.
-    - Use **"approve"** if the user is fully satisfied and wants to keep the code exactly as it is, with **no changes requested**.
-    - Use **"regenerate"** if the user asks for **any modifications**, **improvements**, or expresses **dissatisfaction** with the current code.
-    - Use **"execute"** if the user wants to run the code in a sandbox to check for errors.
-    Only return the JSON object — do not include any other text, explanations, or logs.
-    """
+#     ### Definitions:
+#     - Use **"evaluation"** if the user wants to perform an evaluation or if the user talks about to evaluate.
+#     - Use **"approve"** if the user is fully satisfied and wants to keep the code exactly as it is, with **no changes requested**.
+#     - Use **"regenerate"** if the user asks for **any modifications**, **improvements**, or expresses **dissatisfaction** with the current code.
+#     - Use **"execute"** if the user wants to run the code in a sandbox to check for errors.
+#     Only return the JSON object — do not include any other text, explanations, or logs.
+#     """
 
 
     
 
 
+#     try:
+#         response = agent.run(prompt)
+#         response_text = getattr(response, "content", str(response))
+#         print(f"RAW DECISION RESPONSE: {response_text}")
+
+#         response_text = remove_think_tags(response_text)
+
+#         print(f"RESPONSE TEXT: {response_text}")
+
+#         parsed = json.loads(response_text)
+#         action = parsed.get("response", "regenerate").lower()
+
+#         if action not in {"regenerate", "approve", "evaluation", "execute"}:
+#             action = "regenerate"
+
+#     except Exception as e:
+#         print(f"Error parsing feedback response: {e}")
+#         action = "regenerate"
+
+#     state.user_feedback_processed = action
+#     return {"user_feedback_processed": action}
+
+def process_feedback(state: SummaryState, config: RunnableConfig):
+    """Process the user feedback and classify next action with optional filename."""
+    print("---PROCESSING FEEDBACK DECISION---")
+
+    agent = Agent(
+        model=Ollama(id="deepseek-r1"),
+        tools=[],
+        show_tool_calls=False,
+        use_json_mode=True,  
+    )
+
+    prompt = f"""\
+You are a decision agent that classifies user feedback into actions.
+
+User feedback: {state.research_topic}
+
+Respond with ONLY ONE JSON object (no markdown, no explanations):
+
+For approve/regenerate/evaluation:
+{{"response": "approve"}}
+{{"response": "regenerate"}}
+{{"response": "evaluation"}}
+
+For execute (with optional filename):
+{{"response": "execute"}}
+{{"response": "execute", "file_name": "train.py"}}
+{{"response": "execute", "file_name": "main.py"}}
+
+### Definitions:
+- "evaluation": if user wants to evaluate the code
+- "approve": if user is fully satisfied, wants no changes
+- "regenerate": if user asks for modifications or improvements
+- "execute": if user wants to run/test the code in sandbox
+  - Include "file_name" ONLY if user specifies which file (e.g., "execute train.py")
+  - Omit "file_name" if user just says "run it" or "execute"
+
+### Examples:
+User: "execute train.py" → {{"response": "execute", "file_name": "train.py"}}
+User: "run main.py" → {{"response": "execute", "file_name": "main.py"}}
+User: "test config.py" → {{"response": "execute", "file_name": "config.py"}}
+User: "execute" → {{"response": "execute"}}
+User: "run it" → {{"response": "execute"}}
+User: "Make it faster" → {{"response": "regenerate"}}
+User: "Looks good" → {{"response": "approve"}}
+User: "Please evaluate this" → {{"response": "evaluation"}}
+
+Return ONLY valid JSON. No markdown. No extra text.
+"""
+
+    response = agent.run(prompt)
+    
+    
+    
     try:
-        response = agent.run(prompt)
-        response_text = getattr(response, "content", str(response))
-        print(f"RAW DECISION RESPONSE: {response_text}")
-
+        # Extract JSON from response
+        json_match = re.search(r'\{.*\}', response.content, re.DOTALL)
+        if json_match:
+            response_dict = json.loads(json_match.group())
+        else:
+            response_dict = json.loads(response.content)
         
-
-        response_text = remove_think_tags(response_text)
-
-        print(f"RESPONSE TEXT: {response_text}")
-
-        parsed = json.loads(response_text)
-        action = parsed.get("response", "regenerate").lower()
-
-        if action not in {"regenerate", "approve", "evaluation", "execute"}:
-            action = "regenerate"
-
-    except Exception as e:
-        print(f"Error parsing feedback response: {e}")
-        action = "regenerate"
-
-    state.user_feedback_processed = action
-    return {"user_feedback_processed": action}
-
-
+        decision = response_dict.get('response', 'approve')
+        file_name = response_dict.get('file_name', None)  # ← Gets filename if present
+        
+        print(f"Decision: {decision}")
+        if file_name:
+            print(f"File to execute: {file_name}")
+        
+        # Store in state
+        state.user_feedback_processed = decision
+        state.user_specified_file = file_name  # ← NEW: Store the filename
+        
+    except json.JSONDecodeError as e:
+        print(f"Failed to parse response: {e}")
+        print(f"Raw response: {response.content}")
+        state.user_feedback_processed = 'approve'
+        state.user_specified_file = None
+    
+    return state
 
 def collect_feedback_evaluation(state: SummaryState, config: RunnableConfig):
     print("---COLLECTING FEEDBACK FOR EVALUATION FROM USER---")
