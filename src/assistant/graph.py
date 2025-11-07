@@ -285,6 +285,8 @@ logger = logging.getLogger(__name__)
 async def route_question(state: SummaryState, config: RunnableConfig):
     """ Route question to the appropriate node """
 
+    state.research_loop_count = 0
+
     #print(f"Current state: {state}")
 
     await copilotkit_emit_message(config, json.dumps({
@@ -769,14 +771,11 @@ async def academic_research(state, config, papers_limit=3):
     run_response = await asyncio.to_thread(lambda: agent.run(academic_query))
     print("RAW ACADEMIC SEARCH RESPONSE:\n", run_response)
     content = run_response.content
-    return {"academic_source_content": content}
+    return {"academic_source_content": content, "research_loop_count": state.research_loop_count + 1}
 
 
 
     
-
-    
-
 
 
 async def summarize_academic_sources(state: SummaryState, config: RunnableConfig):
@@ -824,7 +823,62 @@ async def summarize_academic_sources(state: SummaryState, config: RunnableConfig
     return {"running_summary": running_summary}
 
 
-# ===== ACADEMIC SEARCH EVALUATION - Same 4-metric approach =====
+
+
+async def reflect_on_academic_summary(state: SummaryState, config: RunnableConfig):
+    """
+    Reflect on the academic summary and generate a follow-up query.
+    EXACT SAME APPROACH as reflect_on_summary but for academic sources.
+    """
+    
+    await copilotkit_emit_message(config, json.dumps({
+        "node": "Reflect on Academic Summary",
+        "content": "Analyzing current academic findings for gaps in knowledge..."
+    }))
+    
+    configurable = Configuration.from_runnable_config(config)
+    
+    # EXACT SAME LLM setup as web search reflection
+    llm_json_mode = ChatOllama(
+        model=configurable.local_llm,
+        temperature=0,
+        format="json"
+    )
+    
+    result = await llm_json_mode.ainvoke(
+        [
+            SystemMessage(content=reflection_instructions.format(
+                research_topic=state.research_topic
+            )),
+            HumanMessage(content=f"Identify a knowledge gap and generate a follow-up academic search query based on our existing knowledge\n\n{state.running_summary}")
+        ]
+    )
+    
+    followup_query = json.loads(result.content)
+    query = followup_query.get("followup_query")
+    
+    if not query:
+        return {"search_query": f"Tell me more about {state.research_topic}"}
+    
+    return {"search_query": followup_query}
+
+
+# ===== ROUTE FUNCTION FOR ACADEMIC =====
+# Same routing logic as route_research
+
+async def route_academic_research(state: SummaryState, config: RunnableConfig):
+    """
+    Route academic research based on loop count.
+    EXACT SAME as route_research but for academic branch.
+    """
+    
+    # Check research loop count
+    if state.research_loop_count >= 2:  # max 2 loops for academic
+        return "finalize_academic_summary"
+    else:
+        return "academic_research"  # Continue researching
+
+
 
 def _evaluate_academic_summary_sync(
     research_topic: str,
@@ -3594,6 +3648,7 @@ builder.add_node("academic_research", academic_research)
 builder.add_node("summarize_academic_sources", summarize_academic_sources)
 builder.add_node("generate_academic_query", generate_academic_query)
 builder.add_node("finalize_academic_summary", finalize_academic_summary)
+builder.add_node("reflect_on_academic_summary", reflect_on_academic_summary)
 
 
 
@@ -3637,10 +3692,25 @@ builder.add_conditional_edges("reflect_on_summary", route_research)
 builder.add_edge("finalize_summary", END)
 
 builder.add_edge("generate_academic_query", "academic_research")
-builder.add_edge("academic_research", "summarize_academic_sources")
+#builder.add_edge("academic_research", "summarize_academic_sources")
 #builder.add_edge("summarize_academic_sources", END)
-builder.add_edge("summarize_academic_sources", "finalize_academic_summary")
+#builder.add_edge("summarize_academic_sources", "finalize_academic_summary")
+builder.add_edge("summarize_academic_sources", "reflect_on_academic_summary")
 
+# From reflection, route based on loop count:
+builder.add_conditional_edges(
+    "reflect_on_academic_summary",
+    route_academic_research,
+    {
+        "academic_research": "academic_research",
+        "finalize_academic_summary": "finalize_academic_summary"
+    }
+)
+
+# Back to research if continuing:
+builder.add_edge("academic_research", "summarize_academic_sources")
+
+# Finalize to END (already exists):
 builder.add_edge("finalize_academic_summary", END)
 
 builder.add_edge("search_relevant_sources", "generate")
