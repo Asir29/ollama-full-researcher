@@ -829,6 +829,174 @@ async def summarize_academic_sources(state: SummaryState, config: RunnableConfig
     return {"running_summary": running_summary}
 
 
+# ===== ACADEMIC SEARCH EVALUATION - Same 4-metric approach =====
+
+def _evaluate_academic_summary_sync(
+    research_topic: str,
+    running_summary: str,
+    academic_sources: list
+) -> dict:
+    """
+    SYNCHRONOUS evaluation for academic search - runs in separate thread.
+    Uses same 4 metrics as web search for consistency.
+    """
+    print("\n🔍 Running DeepEval evaluation for Academic Search with Ollama (deepseek-r1:latest)...\n")
+    
+    try:
+        # ===== CRITICAL: SET ENVIRONMENT VARIABLES FIRST =====
+        import os
+        os.environ["DEEPEVAL_RESULTS_FOLDER"] = ""
+        os.environ["DEEPEVAL_DISABLE_TELEMETRY"] = "1"
+        # Force no caching
+        os.environ["DEEPEVAL_SKIP_PROMPTS_CACHE"] = "1"
+        # ===== THEN import DeepEval AFTER setting env vars =====
+        
+        from deepeval import evaluate
+        from deepeval.models import OllamaModel
+        from deepeval.metrics import (
+            FaithfulnessMetric,
+            AnswerRelevancyMetric,
+            ContextualRelevancyMetric,
+            HallucinationMetric
+        )
+        from deepeval.test_case import LLMTestCase
+        
+        # Initialize Ollama model
+        ollama_model = OllamaModel(
+            model="deepseek-r1:latest",
+            base_url="http://localhost:11434"
+        )
+        
+        # Define metrics that work with academic search
+        faithfulness = FaithfulnessMetric(threshold=0.55, model=ollama_model)
+        relevancy = AnswerRelevancyMetric(threshold=0.55, model=ollama_model)
+        contextual_relevancy = ContextualRelevancyMetric(threshold=0.55, model=ollama_model)
+        hallucination = HallucinationMetric(threshold=0.55, model=ollama_model)
+        
+        # Create test case with BOTH context AND retrieval_context
+        test_case = LLMTestCase(
+            input=research_topic,
+            actual_output=running_summary,
+            context=academic_sources,              # ← For Hallucination & ContextualRelevancy
+            retrieval_context=academic_sources     # ← For Faithfulness
+        )
+        
+        # Run evaluation with 4 compatible metrics
+        result = evaluate(
+            [test_case],
+            [
+                faithfulness,
+                relevancy,
+                contextual_relevancy,
+                hallucination
+            ]
+        )
+        
+        # Extract scores after evaluation completes
+        faithfulness_score = faithfulness.score if faithfulness.score is not None else 0.0
+        relevancy_score = relevancy.score if relevancy.score is not None else 0.0
+        contextual_relevancy_score = contextual_relevancy.score if contextual_relevancy.score is not None else 0.0
+        hallucination_score = hallucination.score if hallucination.score is not None else 0.0
+        
+        
+        
+        # Return success with all metric scores
+        return {
+            "completed": True,
+            "status": "EVALUATED",
+            "total_metrics": 4,
+            "source_type": "academic"
+        }
+        
+    except Exception as e:
+        print(f"\n❌ Academic Evaluation error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "completed": False,
+            "error": str(e),
+            "status": "ERROR"
+        }
+
+
+async def evaluate_academic_summary_with_interrupt(
+    research_topic: str,
+    running_summary: str,
+    academic_sources: list
+) -> dict:
+    """
+    Evaluate the academic summary with user interrupt.
+    Runs DeepEval in separate thread (bypasses uvloop).
+    Uses same 4 metrics as web search for consistency.
+    """
+    
+    print("\n" + "="*80)
+    print("GENERATED ACADEMIC SUMMARY:")
+    print("="*80)
+    print(running_summary)
+    print("="*80 + "\n")
+
+    user_input = "yes"
+    
+    # Get user input in thread (non-blocking)
+    #user_input = await asyncio.to_thread(
+    #    input,
+    #    "Do you want to evaluate this academic summary? (yes/no): "
+    #)
+
+    user_input = user_input.strip().lower()
+        
+    if user_input in ["yes", "y"]:
+        # ===== CRITICAL: Run evaluation in SEPARATE THREAD =====
+        evaluation_result = await asyncio.to_thread(
+            _evaluate_academic_summary_sync,
+            research_topic,
+            running_summary,
+            academic_sources
+        )
+        # ===== END THREAD EXECUTION =====
+        
+        return evaluation_result
+    
+    else:
+        print("\n⏭️  No academic evaluation performed. Continuing...\n")
+        return {
+            "completed": False,
+            "status": "SKIPPED"
+        }
+
+
+# ===== MODIFIED finalize_academic_summary =====
+async def finalize_academic_summary(state, config):
+    """
+    Modified finalize_academic_summary that includes comprehensive evaluation.
+    Uses same 4 RAG metrics as web search for consistency:
+    Faithfulness, Answer Relevancy, Contextual Relevancy, Hallucination.
+    """
+    
+    # Your existing finalize logic
+    all_sources = state.academic_source_content if state.academic_source_content else "No academic sources"
+    final_summary = f"## Academic Summary\n\n{state.running_summary}\n\n### Sources:\n{all_sources}"
+    
+    # ===== COMPREHENSIVE EVALUATION (using thread-based approach) =====
+    evaluation_result = await evaluate_academic_summary_with_interrupt(
+        research_topic=state.research_topic,
+        running_summary=state.running_summary,
+        academic_sources=[state.academic_source_content] if state.academic_source_content else []
+    )
+    # ===== END EVALUATION =====
+    
+    await copilotkit_exit(config)
+    
+    return {
+        "running_summary": final_summary,
+        "evaluation_results": evaluation_result
+    }
+
+
+
+
+
 ########################################### CODE GENERATION BRANCH #############################################
 
 # -------------------------
@@ -3430,6 +3598,8 @@ builder.add_node("json_parser", json_parser)
 builder.add_node("academic_research", academic_research)
 builder.add_node("summarize_academic_sources", summarize_academic_sources)
 builder.add_node("generate_academic_query", generate_academic_query)
+builder.add_node("finalize_academic_summary", finalize_academic_summary)
+
 
 
 # Add nodes for code generation and code checking
@@ -3473,7 +3643,10 @@ builder.add_edge("finalize_summary", END)
 
 builder.add_edge("generate_academic_query", "academic_research")
 builder.add_edge("academic_research", "summarize_academic_sources")
-builder.add_edge("summarize_academic_sources", END)
+#builder.add_edge("summarize_academic_sources", END)
+builder.add_edge("summarize_academic_sources", "finalize_academic_summary")
+
+builder.add_edge("finalize_academic_summary", END)
 
 builder.add_edge("search_relevant_sources", "generate")
 
