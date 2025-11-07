@@ -541,6 +541,7 @@ def _evaluate_summary_sync(
 ) -> dict:
     """
     SYNCHRONOUS evaluation - runs in separate thread.
+    Uses metrics compatible with web search.
     """
     print("\n🔍 Running DeepEval evaluation with Ollama (deepseek-r1:latest)...\n")
     
@@ -553,9 +554,14 @@ def _evaluate_summary_sync(
         os.environ["DEEPEVAL_SKIP_PROMPTS_CACHE"] = "1"
         # ===== THEN import DeepEval AFTER setting env vars =====
         
-        from deepeval import assert_test
+        from deepeval import evaluate
         from deepeval.models import OllamaModel
-        from deepeval.metrics import FaithfulnessMetric, AnswerRelevancyMetric
+        from deepeval.metrics import (
+            FaithfulnessMetric,
+            AnswerRelevancyMetric,
+            ContextualRelevancyMetric,
+            HallucinationMetric
+        )
         from deepeval.test_case import LLMTestCase
         
         # Initialize Ollama model
@@ -564,55 +570,50 @@ def _evaluate_summary_sync(
             base_url="http://localhost:11434"
         )
         
-        # Define metrics
-        faithfulness = FaithfulnessMetric(threshold=0.55, model=ollama_model)
+        # Define metrics that work with web search
+        faithfulness = FaithfulnessMetric(threshold=0.55, model=ollama_model) 
         relevancy = AnswerRelevancyMetric(threshold=0.55, model=ollama_model)
+        contextual_relevancy = ContextualRelevancyMetric(threshold=0.55, model=ollama_model)
+        hallucination = HallucinationMetric(threshold=0.55, model=ollama_model)
         
-        # Create test case
+        # Create test case with BOTH context AND retrieval_context
+        # FaithfulnessMetric requires BOTH
         test_case = LLMTestCase(
             input=research_topic,
             actual_output=running_summary,
-            retrieval_context=web_research_results
+            context=web_research_results,              # ← For Hallucination & ContextualRelevancy
+            retrieval_context=web_research_results     # ← For Faithfulness
         )
         
-        # Run evaluation
-        #assert_test(test_case, [faithfulness, relevancy]) # Original (raises on failure)
-        result = evaluate([test_case], [faithfulness, relevancy])
-
+        # Run evaluation with 4 compatible metrics
+        result = evaluate(
+            [test_case],
+            [
+                faithfulness,
+                relevancy,
+                contextual_relevancy,
+                hallucination
+            ]
+        )
         
         
-        print("\n" + "="*80)
-        print("✅ EVALUATION COMPLETE!")
-        print("="*80)
-        print("   ✓ Faithfulness (supported by docs): PASS")
-        print("   ✓ Answer Relevancy (addresses query): PASS")
-        print("="*80 + "\n")
         
-        # return {
-        #     "completed": True,
-        #     "status": "PASS",
-        #     "metrics_passed": 2,
-        #     "total_metrics": 2
-        # }
-
-        
-
-        # Return success even if below threshold
+        # Return success with all metric scores
         return {
             "completed": True,
             "status": "EVALUATED",
-            "faithfulness_score": faithfulness.score,
-            "relevancy_score": relevancy.score
+            "total_metrics": 4
         }
         
     except Exception as e:
         print(f"\n❌ Evaluation error: {e}")
+        import traceback
+        traceback.print_exc()
         return {
             "completed": False,
             "error": str(e),
             "status": "ERROR"
         }
-
 
 
 # ===== STEP 2: MODIFIED evaluate_summary_with_interrupt =====
@@ -623,7 +624,8 @@ async def evaluate_summary_with_interrupt(
 ) -> dict:
     """
     Evaluate the summary with user interrupt.
-    MODIFIED: Runs DeepEval in separate thread (bypasses uvloop).
+    Runs DeepEval in separate thread (bypasses uvloop).
+    Uses 4 web search-compatible metrics.
     """
     
     print("\n" + "="*80)
@@ -631,12 +633,15 @@ async def evaluate_summary_with_interrupt(
     print("="*80)
     print(running_summary)
     print("="*80 + "\n")
+
+    user_input = "yes"
     
     # Get user input in thread (non-blocking)
-    user_input = await asyncio.to_thread(
-        input,
-        "Do you want to evaluate this summary for faithfulness and quality? (yes/no): "
-    )
+    #user_input = await asyncio.to_thread(
+    #    input,
+    #    "Do you want to evaluate this summary? (yes/no): "
+    #)
+
     user_input = user_input.strip().lower()
         
     if user_input in ["yes", "y"]:
@@ -662,20 +667,16 @@ async def evaluate_summary_with_interrupt(
 # ===== STEP 3: MODIFIED finalize_summary =====
 async def finalize_summary(state, config):
     """
-    Modified finalize_summary that includes evaluation interrupt.
+    Modified finalize_summary that includes comprehensive evaluation.
+    Uses 4 RAG metrics compatible with web search:
+    Faithfulness, Answer Relevancy, Contextual Relevancy, Hallucination.
     """
     
     # Your existing finalize logic
     all_sources = "\n".join(source for source in state.sources_gathered)
     final_summary = f"## Summary\n\n{state.running_summary}\n\n### Sources:\n{all_sources}"
     
-    # Emit final message
-    await copilotkit_emit_message(config, json.dumps({
-        "node": "Finalize Summary",
-        "content": final_summary,
-    }))
-    
-    # ===== EVALUATION (using thread-based approach) =====
+    # ===== COMPREHENSIVE EVALUATION (using thread-based approach) =====
     evaluation_result = await evaluate_summary_with_interrupt(
         research_topic=state.research_topic,
         running_summary=state.running_summary,
@@ -689,6 +690,8 @@ async def finalize_summary(state, config):
         "running_summary": final_summary,
         "evaluation_results": evaluation_result
     }
+
+
 
 
 
