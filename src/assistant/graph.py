@@ -495,11 +495,6 @@ async def reflect_on_summary(state: SummaryState, config: RunnableConfig):
     # Get the follow-up query
     query = follow_up_query.get('follow_up_query')
 
-    
-
-    # Get the follow-up query
-    query = follow_up_query.get('follow_up_query')
-
     # JSON mode can fail in some cases
     if not query:
 
