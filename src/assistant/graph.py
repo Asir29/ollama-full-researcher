@@ -1,5 +1,24 @@
 #langgraph dev --no-reload --allow-blocking  # to run without reloading and allow blocking operations (to use DeepEval)
 
+# ===========================
+# CRITICAL: Path Configuration
+# ===========================
+import sys
+import os
+from pathlib import Path
+
+# Get the directory where this script is located
+current_script_dir = Path(__file__).parent.absolute()
+
+# Add it to sys.path FIRST, before any other imports
+if str(current_script_dir) not in sys.path:
+    sys.path.insert(0, str(current_script_dir))
+
+print(f"✅ Added to sys.path: {current_script_dir}")
+print(f"✅ Python will search for modules in: {current_script_dir}")
+
+
+
 import os
 os.environ["DISABLE_NEST_ASYNCIO"] = "1"
 
@@ -18,6 +37,24 @@ import torch                    # PyTorch (GPU/CPU tensors, deep learning)
 torch.cuda.empty_cache()        # Clear CUDA memory if needed
 from datetime import datetime
 
+# -----------------------------
+# Global logging configuration
+# -----------------------------
+logging.basicConfig(
+    level=logging.INFO,  # Show INFO, WARNING, ERROR, CRITICAL messages
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",  
+    # Using a safe, standard format that includes timestamp, logger name, level, and message
+)
+
+logging.getLogger("langgraph_api.server").setLevel(logging.WARNING)
+# Only show WARNING and ERROR from the langgraph_api.server logger to reduce clutter
+
+logger = logging.getLogger(__name__)  
+# Use this logger in your module: logger.info(...), logger.warning(...), etc.
+
+
+
+
 
 # -------------------------
 # Type Annotations & Data Models
@@ -26,6 +63,7 @@ from typing import TypedDict
 from typing_extensions import Literal
 from typing import Annotated
 from pydantic import BaseModel, Field  # For structured data validation
+from typing import List
 
 # -------------------------
 # LangGraph / LangChain Core
@@ -101,6 +139,13 @@ from sentence_transformers import SentenceTransformer  # Embedding model for tex
 from langchain.schema import Document                   # Standard document container for LangChain
 
 # -------------------------
+# CopilotKit / LangGraph Utilities
+# -------------------------
+from copilotkit.langgraph import copilotkit_emit_message, copilotkit_exit, copilotkit_customize_config
+
+
+
+# -------------------------
 # Custom Assistant Modules
 # -------------------------
 from src.assistant.configuration import Configuration
@@ -113,172 +158,44 @@ from src.assistant.prompts import (
     code_reflection_instructions, code_search_instructions, code_normalization_instructions
 )
 
-# -------------------------
-# Helper Functions
-# -------------------------
-def load_and_split(docs, chunk_size=512, overlap=50):
-    """Split crawled documents into chunks."""
-    splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
-        chunk_size=chunk_size,
-        chunk_overlap=overlap
-    )
-    return splitter.split_documents(docs)
-
-def build_vectorstore(docs, embedding_model, collection="default", persist=None):
-    """Build a Chroma vectorstore from documents + embeddings."""
-    return Chroma.from_documents(
-        documents=docs,
-        embedding=embedding_model,
-        collection_name=collection,
-        persist_directory=persist
-    )
-
-def extract_packages_from_imports(import_block: str):
-    """
-    Use LLM to extract pip-installable packages from import statements.
-    Cleans out fenced code blocks and enforces JSON output.
-    """
-    print("Extracting packages from imports...\n", import_block)
-
-    # 1️⃣ Remove fenced code blocks (```python ... ``` or ``` ... ```)
-    cleaned = re.sub(r"```(?:python)?\s*([\s\S]*?)```", r"\1", import_block).strip()
-
-    prompt = f"""
-    You are a Python dependency extractor.
-
-    Task: From the following Python import statements, return ONLY a JSON array of top-level pip-installable package names.
-
-    Rules:
-    - Do NOT include standard library modules (json, re, logging, os, sys, typing, etc.).
-    - Keep only installable packages (e.g., numpy, torch, scikit-learn).
-    - Use correct PyPI names (e.g., sklearn → scikit-learn, cv2 → opencv-python-headless, PIL → Pillow).
-    - Output must be valid JSON: ["pkg1", "pkg2", ...] — nothing else.
-
-    Python imports to analyze:
-    {cleaned}
-    """
-
-    agent = Agent(
-        model=Ollama(id="mistral:latest"),
-        tools=[],
-        show_tool_calls=False,
-        use_json_mode=True,   # 🔑 enforce structured JSON
-    )
-
-    try:
-        response = agent.run(prompt)
-        response_text = response.content if hasattr(response, "content") else str(response)
-        #print("RAW RESPONSE:", response_text)
-
-        packages = json.loads(response_text)
-        if not isinstance(packages, list):
-            raise ValueError("LLM did not return a JSON list")
-
-        return [pkg.strip() for pkg in packages if isinstance(pkg, str) and pkg.strip()]
-
-    except Exception as e:
-        print("Fallback to empty package list due to error:", e)
-        return []
-
-def remove_think_tags(text: str) -> str:
-    """
-    Removes all occurrences of <think>...</think> tags from a string.
-
-    Args:
-        text (str): The input string potentially containing <think> tags.
-
-    Returns:
-        str: The cleaned string without any <think>...</think> segments.
-    """
-    cleaned_text = text
-    while "<think>" in cleaned_text and "</think>" in cleaned_text:
-        start = cleaned_text.find("<think>")
-        end = cleaned_text.find("</think>") + len("</think>")
-        cleaned_text = cleaned_text[:start] + cleaned_text[end:]
-    return cleaned_text
-
-def save_code_to_file(code_str: str, output_dir: str, filename: str, mode="w"):
-    """
-    Saves code string. If code contains # FILE: markers, splits into multiple files.
-    Otherwise saves as single file.
-    
-    Args:
-        code_str (str): The code to save (may contain # FILE: markers)
-        output_dir (str): Base directory path
-        filename (str): Session filename (used for session folder)
-        mode (str): Ignored when splitting files
-    """
-    import re
-    from datetime import datetime
-    
-    # Extract timestamp from filename or create new one
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    session_dir = os.path.join(output_dir, f"generated_code_{timestamp}")
-    
-    # Check if code has FILE markers
-    file_pattern = re.compile(r'^# FILE:\s*(\w+(?:\.\w+)?)\s*$', re.MULTILINE)
-    file_matches = list(file_pattern.finditer(code_str))
-    
-    if not file_matches:
-        # No markers: save as single file (fallback)
-        os.makedirs(output_dir, exist_ok=True)
-        file_path = os.path.join(output_dir, filename)
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(code_str)
-        return
-    
-    # Has markers: split into multiple files
-    os.makedirs(session_dir, exist_ok=True)
-    
-    for i, match in enumerate(file_matches):
-        file_name = match.group(1)
-        start = match.end() + 1  # +1 to skip newline after marker
-        
-        # Find end: either next FILE marker or end of string
-        if i + 1 < len(file_matches):
-            end = file_matches[i + 1].start()
-        else:
-            end = len(code_str)
-        
-        file_content = code_str[start:end].strip()
-        
-        # Ensure .py extension
-        if not file_name.endswith('.py'):
-            file_name += '.py'
-        
-        file_path = os.path.join(session_dir, file_name)
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(file_content)
-    
-    # Print summary
-    print(f"\n✅ Code saved to: {session_dir}")
-    print(f"📁 Files created:")
-    for file in sorted(os.listdir(session_dir)):
-        file_path = os.path.join(session_dir, file)
-        size = os.path.getsize(file_path)
-        print(f"   • {file} ({size} bytes)")
-
-
-# -------------------------
-# CopilotKit / LangGraph Utilities
-# -------------------------
-from copilotkit.langgraph import copilotkit_emit_message, copilotkit_exit, copilotkit_customize_config
-
-
-# -----------------------------
-# Global logging configuration
-# -----------------------------
-logging.basicConfig(
-    level=logging.INFO,  # Show INFO, WARNING, ERROR, CRITICAL messages
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",  
-    # Using a safe, standard format that includes timestamp, logger name, level, and message
+from helper import (
+    load_and_split,
+    build_vectorstore,
+    extract_packages_from_imports,
+    remove_think_tags,
+    save_code_to_file
 )
 
-logging.getLogger("langgraph_api.server").setLevel(logging.WARNING)
-# Only show WARNING and ERROR from the langgraph_api.server logger to reduce clutter
 
-logger = logging.getLogger(__name__)  
-# Use this logger in your module: logger.info(...), logger.warning(...), etc.
+
+# ===== Web Branch Imports =====
+from web_branch import (
+    generate_query,
+    web_research,
+    json_parser,
+    summarize_sources,
+    reflect_on_summary,
+    finalize_summary,
+    evaluate_summary_with_interrupt,
+    route_research
+)
+
+# ===== Academic Branch Imports =====
+from academic_branch import (
+    generate_academic_query,
+    academic_research,
+    summarize_academic_sources,
+    reflect_on_academic_summary,
+    finalize_academic_summary,
+    evaluate_academic_summary_with_interrupt,
+    route_academic_research
+)
+
+
+
+
+
+
 
 
 # Nodes
@@ -333,714 +250,6 @@ async def route_question(state: SummaryState, config: RunnableConfig):
 
 
 
-############################################### WEB RESEARCH BRANCH ###############################################
-
-async def generate_query(state: SummaryState, config: RunnableConfig):
-    """ Generate a query for web search """
-    
-    # Format the prompt
-    #print(f"Current state: {state}")
-    query_writer_instructions_formatted = query_writer_instructions.format(research_topic=state.research_topic)
-
-    # Generate a query
-    configurable = Configuration.from_runnable_config(config)
-    llm_json_mode = ChatOllama(model=configurable.local_llm, temperature=0, format="json")
-    result = await llm_json_mode.ainvoke(
-        [SystemMessage(content=query_writer_instructions_formatted),
-        HumanMessage(content=f"Generate a query for web search:")]
-    )   
-    query = json.loads(result.content)
-    
-    await copilotkit_emit_message(config, json.dumps({
-        "node": "Generate Query",
-        "content": query['query']
-    }))
-    return {"search_query": query['query']}
-
-
-async def web_research(state: SummaryState, config: RunnableConfig):
-    """ Gather information from the web """
-
-    print("IN WEB RESEARCH")    
-    max_results = 5
-    include_raw_content = True
-
-    # Customize config to not emit tool calls during web search
-    config = copilotkit_customize_config(config, emit_tool_calls=False)
-    
-    await copilotkit_emit_message(config, json.dumps({
-        "node": "Web Research",
-        "content": f"Searching for: {state.search_query}"
-    }))
-    
-    # Search the web
-    agent = Agent(
-        model=Ollama(id="qwen3:latest"),
-        tools=[TavilyTools()], #GoogleSearchTools() DuckDuckGoTools()
-        show_tool_calls=False,
-        markdown=True
-        
-    )
-
-    query = web_search_instructions + "\n Search for the following query: " + state.search_query + "\n"
-    #run_response = agent.run(query)
-    #run_response = await agent.arun(query)  # ✅ Non-blocking!
-    run_response = await asyncio.to_thread(lambda: agent.run(query))
-
-    print("RAW SEARCH RESPONSE:\n", run_response)
-
-    content = run_response.content
-
-    return {"raw_search_result": content}
-
-
-
-
-
-
-
-async def json_parser(state: SummaryState, config: RunnableConfig):
-    """ Parse the JSON output from the web search """
-    await copilotkit_emit_message(config, json.dumps({
-        "node": "JSON Pasrser",
-        "content": "Parsing JSON output..."
-    }))
-
-    configurable = Configuration.from_runnable_config(config)
-    llm = ChatOllama(model=configurable.local_llm, temperature=0)
-    result = await llm.ainvoke(
-        [SystemMessage(content=web_search_expected_output),
-        HumanMessage(content=state.raw_search_result)]
-    )
-    content = result.content
-    start_index = content.find("{")
-    strip_content = content[start_index:] if start_index != -1 else content
-    end_index = strip_content.rfind("}")
-    search_str = strip_content[:end_index+1] if end_index != -1 else strip_content
-
-    [print(f"Search results: {search_str}")]
-
-    search_results = json.loads(search_str)
-    # Format the sources
-    search_str = deduplicate_and_format_sources(search_results, max_tokens_per_source=3000)
-    
-    await copilotkit_emit_message(config, json.dumps({
-        "node": "Web Research",
-        "content": "Found and processed search results"
-    }))
-    return {"sources_gathered": [format_sources(search_results)], "research_loop_count": state.research_loop_count + 1, "web_research_results": [search_str]}
-
-async def summarize_sources(state: SummaryState, config: RunnableConfig):
-    """ Summarize the gathered sources """
-    
-    await copilotkit_emit_message(config, json.dumps({
-        "node": "Summarize Sources",
-        "content": "Summarizing gathered information..."
-    }))
-    
-    # Existing summary
-    existing_summary = state.running_summary
-
-    # Most recent web research
-    most_recent_web_research = state.web_research_results[-1]
-
-    # Build the human message
-    if existing_summary:
-        human_message_content = (
-            f"Extend the existing summary: {existing_summary}\n\n"
-            f"Include new search results: {most_recent_web_research} "
-            f"That addresses the following topic: {state.research_topic}"
-        )
-    else:
-        human_message_content = (
-            f"Generate a summary of these search results: {most_recent_web_research} "
-            f"That addresses the following topic: {state.research_topic}"
-        )
-
-    # Run the LLM
-    configurable = Configuration.from_runnable_config(config)
-    llm = ChatOllama(model=configurable.local_llm, temperature=0)
-    result = await llm.ainvoke(
-        [SystemMessage(content=summarizer_instructions),
-        HumanMessage(content=human_message_content)]
-    )
-
-    running_summary = result.content
-
-
-
-    running_summary = remove_think_tags(running_summary)
-
-    await copilotkit_emit_message(config, json.dumps({
-        "node": "Summarize Sources",
-        "content": running_summary
-    }))
-    return {"running_summary": running_summary}
-
-async def reflect_on_summary(state: SummaryState, config: RunnableConfig):
-    """ Reflect on the summary and generate a follow-up query """
-
-    await copilotkit_emit_message(config, json.dumps({
-        "node": "Reflect on Summary",
-        "content": "Analyzing current findings for gaps in knowledge..."
-    }))
-    
-    # Generate a query
-    configurable = Configuration.from_runnable_config(config)
-    llm_json_mode = ChatOllama(model=configurable.local_llm, temperature=0, format="json")
-    result = await llm_json_mode.ainvoke(
-        [SystemMessage(content=reflection_instructions.format(research_topic=state.research_topic)),
-        HumanMessage(content=f"Identify a knowledge gap and generate a follow-up web search query based on our existing knowledge: {state.running_summary}")]
-    )   
-    follow_up_query = json.loads(result.content)
-
-    # Get the follow-up query
-    query = follow_up_query.get('follow_up_query')
-
-    # JSON mode can fail in some cases
-    if not query:
-
-        # Fallback to a placeholder query
-        return {"search_query": f"Tell me more about {state.research_topic}"}
-
-    # Update search query with follow-up query
-    return {"search_query": follow_up_query['follow_up_query']}
-
-# async def finalize_summary(state: SummaryState, config: RunnableConfig):
-#     """ Finalize the summary """
-    
-#     await copilotkit_emit_message(config, json.dumps({
-#         "node": "Finalize Summary",
-#         "content": "Finalizing research summary..."
-#     }))
-    
-#     # Format all accumulated sources into a single bulleted list
-#     all_sources = "\n".join(source for source in state.sources_gathered)
-#     final_summary = f"## Summary\n\n{state.running_summary}\n\n ### Sources:\n{all_sources}"
-    
-#     await copilotkit_emit_message(config, json.dumps({
-#         "node": "Finalize Summary",
-#         "content": final_summary
-#     }))
-    
-#     # Signal completion to copilotkit
-#     await copilotkit_exit(config)
-    
-#     return {"running_summary": final_summary}
-
-import asyncio
-
-# ===== STEP 1: NEW FUNCTION - Synchronous evaluation (runs in thread) =====
-def _evaluate_summary_sync(
-    research_topic: str,
-    running_summary: str,
-    web_research_results: list
-) -> dict:
-    """
-    SYNCHRONOUS evaluation - runs in separate thread.
-    Uses metrics compatible with web search.
-    """
-    print("\n🔍 Running DeepEval evaluation with Ollama (deepseek-r1:latest)...\n")
-    
-    try:
-        # ===== CRITICAL: SET ENVIRONMENT VARIABLES FIRST =====
-        import os
-        os.environ["DEEPEVAL_RESULTS_FOLDER"] = ""
-        os.environ["DEEPEVAL_DISABLE_TELEMETRY"] = "1"
-        # Force no caching
-        os.environ["DEEPEVAL_SKIP_PROMPTS_CACHE"] = "1"
-        # ===== THEN import DeepEval AFTER setting env vars =====
-        
-        from deepeval import evaluate
-        from deepeval.models import OllamaModel
-        from deepeval.metrics import (
-            FaithfulnessMetric,
-            AnswerRelevancyMetric,
-            ContextualRelevancyMetric,
-            HallucinationMetric
-        )
-        from deepeval.test_case import LLMTestCase
-        
-        # Initialize Ollama model
-        ollama_model = OllamaModel(
-            model="deepseek-r1:latest",
-            base_url="http://localhost:11434"
-        )
-        
-        # Define metrics that work with web search
-        faithfulness = FaithfulnessMetric(threshold=0.55, model=ollama_model) 
-        relevancy = AnswerRelevancyMetric(threshold=0.55, model=ollama_model)
-        contextual_relevancy = ContextualRelevancyMetric(threshold=0.55, model=ollama_model)
-        hallucination = HallucinationMetric(threshold=0.55, model=ollama_model)
-        
-        # Create test case with BOTH context AND retrieval_context
-        # FaithfulnessMetric requires BOTH
-        test_case = LLMTestCase(
-            input=research_topic,
-            actual_output=running_summary,
-            context=web_research_results,              # ← For Hallucination & ContextualRelevancy
-            retrieval_context=web_research_results     # ← For Faithfulness
-        )
-        
-        # Run evaluation with 4 compatible metrics
-        result = evaluate(
-            [test_case],
-            [
-                faithfulness,
-                relevancy,
-                contextual_relevancy,
-                hallucination
-            ]
-        )
-        
-        
-        
-        # Return success with all metric scores
-        return {
-            "completed": True,
-            "status": "EVALUATED",
-            "total_metrics": 4
-        }
-        
-    except Exception as e:
-        print(f"\n❌ Evaluation error: {e}")
-        import traceback
-        traceback.print_exc()
-        return {
-            "completed": False,
-            "error": str(e),
-            "status": "ERROR"
-        }
-
-
-# ===== STEP 2: MODIFIED evaluate_summary_with_interrupt =====
-async def evaluate_summary_with_interrupt(
-    research_topic: str,
-    running_summary: str,
-    web_research_results: list
-) -> dict:
-    """
-    Evaluate the summary with user interrupt.
-    Runs DeepEval in separate thread (bypasses uvloop).
-    Uses 4 web search-compatible metrics.
-    """
-    
-    print("\n" + "="*80)
-    print("GENERATED SUMMARY:")
-    print("="*80)
-    print(running_summary)
-    print("="*80 + "\n")
-
-    user_input = "yes"
-    
-    # Get user input in thread (non-blocking)
-    #user_input = await asyncio.to_thread(
-    #    input,
-    #    "Do you want to evaluate this summary? (yes/no): "
-    #)
-
-    user_input = user_input.strip().lower()
-        
-    if user_input in ["yes", "y"]:
-        # ===== CRITICAL: Run evaluation in SEPARATE THREAD =====
-        evaluation_result = await asyncio.to_thread(
-            _evaluate_summary_sync,
-            research_topic,
-            running_summary,
-            web_research_results
-        )
-        # ===== END THREAD EXECUTION =====
-        
-        return evaluation_result
-    
-    else:
-        print("\n⏭️  No evaluation performed. Continuing...\n")
-        return {
-            "completed": False,
-            "status": "SKIPPED"
-        }
-
-
-# ===== STEP 3: MODIFIED finalize_summary =====
-async def finalize_summary(state, config):
-    """
-    Modified finalize_summary that includes comprehensive evaluation.
-    Uses 4 RAG metrics compatible with web search:
-    Faithfulness, Answer Relevancy, Contextual Relevancy, Hallucination.
-    """
-    
-    # Your existing finalize logic
-    all_sources = "\n".join(source for source in state.sources_gathered)
-    final_summary = f"## Summary\n\n{state.running_summary}\n\n### Sources:\n{all_sources}"
-    
-    # ===== COMPREHENSIVE EVALUATION (using thread-based approach) =====
-    evaluation_result = await evaluate_summary_with_interrupt(
-        research_topic=state.research_topic,
-        running_summary=state.running_summary,
-        web_research_results=state.web_research_results
-    )
-    # ===== END EVALUATION =====
-    
-    await copilotkit_exit(config)
-    
-    return {
-        "running_summary": final_summary,
-        "evaluation_results": evaluation_result
-    }
-
-
-
-
-
-def route_research(state: SummaryState, config: RunnableConfig) -> Literal["finalize_summary", "web_research"]:
-    """ Route the research based on the follow-up query """
-
-    configurable = Configuration.from_runnable_config(config)
-    if state.research_loop_count <= configurable.max_web_research_loops:
-        return "web_research"
-    else:
-        return "finalize_summary" 
-   
-
-
-######################################## ACADEMIC RESEARCH BRANCH ############################################
-
-
-
-async def generate_academic_query(state: SummaryState, config: RunnableConfig):
-    """ Generate a query for academic search """
-    
-    # Format the prompt
-    #print(f"Current state: {state}")
-    query_writer_instructions_formatted = query_writer_instructions.format(research_topic=state.research_topic)
-
-    # Generate a query
-    configurable = Configuration.from_runnable_config(config)
-    llm_json_mode = ChatOllama(model=configurable.local_llm, temperature=0, format="json")
-    result = await llm_json_mode.ainvoke(
-        [SystemMessage(content=query_writer_instructions_formatted),
-        HumanMessage(content=f"Generate a query for an academic search:")]
-    )   
-    query = json.loads(result.content)
-    
-    await copilotkit_emit_message(config, json.dumps({
-        "node": "Generate Query",
-        "content": query['query']
-    }))
-    return {"search_query": query['query']}
-
-
-
-
-
-
-# async def academic_research(state, config, papers_limit=3):
-#     query = state.get("search_query") if isinstance(state, dict) else getattr(state, "search_query", "")
-
-#     # scholarly is synchronous, so run in a thread to avoid blocking event loop
-#     def fetch_papers():
-#         search_query = scholarly.search_pubs(query)
-#         results = []
-#         for _ in range(papers_limit):
-#             try:
-#                 paper = next(search_query)
-#                 title = paper.get('bib', {}).get('title', 'No title')
-#                 abstract = paper.get('bib', {}).get('abstract', 'No abstract')
-#                 results.append(f"{title} - {abstract}")
-#             except StopIteration:
-#                 break
-#         return results
-
-#     abstracts = await asyncio.to_thread(fetch_papers)
-
-#     return {"academic_source_content": abstracts}
-
-
-async def academic_research(state, config, papers_limit=3):
-    query = state.get("search_query") if isinstance(state, dict) else getattr(state, "search_query", "")
-
-    agent = Agent(
-        model=Ollama(id="qwen3:latest"),
-        tools=[ArxivTools()],
-        show_tool_calls=False,
-        markdown=True
-        
-    )
-
-    academic_query = f"Search for academic papers on the following topic: {query}\n"
-    run_response = await asyncio.to_thread(lambda: agent.run(academic_query))
-    print("RAW ACADEMIC SEARCH RESPONSE:\n", run_response)
-    content = run_response.content
-    return {"academic_source_content": content, "research_loop_count": state.research_loop_count + 1}
-
-
-
-    
-
-
-async def summarize_academic_sources(state: SummaryState, config: RunnableConfig):
-
-    print("IN SUMMARIZE ACADEMIC RESEARCH")
-    """ Summarize the gathered sources from academic research """
-    await copilotkit_emit_message(config, json.dumps({
-        "node": "Summarize Academic Sources",
-        "content": "Summarizing gathered information..."
-    }))
-    
-    
-    
-    # Existing summary
-    content = state.academic_source_content
-    
-
-
-    # Build the human message
-    if content:
-        human_message_content = (
-            f"Produce the summary of: {content}\n\n"
-        )
-    else:
-        human_message_content = "empty"
-    
-
-    # Run the LLM
-    configurable = Configuration.from_runnable_config(config)
-    llm = ChatOllama(model=configurable.local_llm, temperature=0)
-    result = await llm.ainvoke(
-        [SystemMessage(content=academic_summarizer_instructions),
-        HumanMessage(content=human_message_content)]
-    )
-
-    running_summary = result.content
-
-
-    running_summary = remove_think_tags(running_summary)
-
-    await copilotkit_emit_message(config, json.dumps({
-        "node": "Summarize Sources",
-        "content": running_summary
-    }))
-    return {"running_summary": running_summary}
-
-
-
-
-async def reflect_on_academic_summary(state: SummaryState, config: RunnableConfig):
-    """
-    Reflect on the academic summary and generate a follow-up query.
-    EXACT SAME APPROACH as reflect_on_summary but for academic sources.
-    """
-    
-    await copilotkit_emit_message(config, json.dumps({
-        "node": "Reflect on Academic Summary",
-        "content": "Analyzing current academic findings for gaps in knowledge..."
-    }))
-    
-    configurable = Configuration.from_runnable_config(config)
-    
-    # EXACT SAME LLM setup as web search reflection
-    llm_json_mode = ChatOllama(
-        model=configurable.local_llm,
-        temperature=0,
-        format="json"
-    )
-    
-    result = await llm_json_mode.ainvoke(
-        [
-            SystemMessage(content=reflection_instructions.format(
-                research_topic=state.research_topic
-            )),
-            HumanMessage(content=f"Identify a knowledge gap and generate a follow-up academic search query based on our existing knowledge\n\n{state.running_summary}")
-        ]
-    )
-    
-    followup_query = json.loads(result.content)
-    query = followup_query.get("followup_query")
-    
-    if not query:
-        return {"search_query": f"Tell me more about {state.research_topic}"}
-    
-    return {"search_query": followup_query}
-
-
-# ===== ROUTE FUNCTION FOR ACADEMIC =====
-# Same routing logic as route_research
-
-async def route_academic_research(state: SummaryState, config: RunnableConfig):
-    """
-    Route academic research based on loop count.
-    EXACT SAME as route_research but for academic branch.
-    """
-    
-    # Check research loop count
-    if state.research_loop_count >= 2:  # max 2 loops for academic
-        return "finalize_academic_summary"
-    else:
-        return "academic_research"  # Continue researching
-
-
-
-def _evaluate_academic_summary_sync(
-    research_topic: str,
-    running_summary: str,
-    academic_sources: list
-) -> dict:
-    """
-    SYNCHRONOUS evaluation for academic search - runs in separate thread.
-    Uses same 4 metrics as web search for consistency.
-    """
-    print("\n🔍 Running DeepEval evaluation for Academic Search with Ollama (deepseek-r1:latest)...\n")
-    
-    try:
-        # ===== CRITICAL: SET ENVIRONMENT VARIABLES FIRST =====
-        import os
-        os.environ["DEEPEVAL_RESULTS_FOLDER"] = ""
-        os.environ["DEEPEVAL_DISABLE_TELEMETRY"] = "1"
-        # Force no caching
-        os.environ["DEEPEVAL_SKIP_PROMPTS_CACHE"] = "1"
-        # ===== THEN import DeepEval AFTER setting env vars =====
-        
-        from deepeval import evaluate
-        from deepeval.models import OllamaModel
-        from deepeval.metrics import (
-            FaithfulnessMetric,
-            AnswerRelevancyMetric,
-            ContextualRelevancyMetric,
-            HallucinationMetric
-        )
-        from deepeval.test_case import LLMTestCase
-        
-        # Initialize Ollama model
-        ollama_model = OllamaModel(
-            model="deepseek-r1:latest",
-            base_url="http://localhost:11434"
-        )
-        
-        # Define metrics that work with academic search
-        faithfulness = FaithfulnessMetric(threshold=0.55, model=ollama_model)
-        relevancy = AnswerRelevancyMetric(threshold=0.55, model=ollama_model)
-        contextual_relevancy = ContextualRelevancyMetric(threshold=0.55, model=ollama_model)
-        hallucination = HallucinationMetric(threshold=0.55, model=ollama_model)
-        
-        # Create test case with BOTH context AND retrieval_context
-        test_case = LLMTestCase(
-            input=research_topic,
-            actual_output=running_summary,
-            context=academic_sources,              # ← For Hallucination & ContextualRelevancy
-            retrieval_context=academic_sources     # ← For Faithfulness
-        )
-        
-        # Run evaluation with 4 compatible metrics
-        result = evaluate(
-            [test_case],
-            [
-                faithfulness,
-                relevancy,
-                contextual_relevancy,
-                hallucination
-            ]
-        )
-        
-        # Extract scores after evaluation completes
-        faithfulness_score = faithfulness.score if faithfulness.score is not None else 0.0
-        relevancy_score = relevancy.score if relevancy.score is not None else 0.0
-        contextual_relevancy_score = contextual_relevancy.score if contextual_relevancy.score is not None else 0.0
-        hallucination_score = hallucination.score if hallucination.score is not None else 0.0
-        
-        
-        
-        # Return success with all metric scores
-        return {
-            "completed": True,
-            "status": "EVALUATED",
-            "total_metrics": 4,
-            "source_type": "academic"
-        }
-        
-    except Exception as e:
-        print(f"\n❌ Academic Evaluation error: {e}")
-        import traceback
-        traceback.print_exc()
-        return {
-            "completed": False,
-            "error": str(e),
-            "status": "ERROR"
-        }
-
-
-async def evaluate_academic_summary_with_interrupt(
-    research_topic: str,
-    running_summary: str,
-    academic_sources: list
-) -> dict:
-    """
-    Evaluate the academic summary with user interrupt.
-    Runs DeepEval in separate thread (bypasses uvloop).
-    Uses same 4 metrics as web search for consistency.
-    """
-    
-    print("\n" + "="*80)
-    print("GENERATED ACADEMIC SUMMARY:")
-    print("="*80)
-    print(running_summary)
-    print("="*80 + "\n")
-
-    user_input = "yes"
-    
-    # Get user input in thread (non-blocking)
-    #user_input = await asyncio.to_thread(
-    #    input,
-    #    "Do you want to evaluate this academic summary? (yes/no): "
-    #)
-
-    user_input = user_input.strip().lower()
-        
-    if user_input in ["yes", "y"]:
-        # ===== CRITICAL: Run evaluation in SEPARATE THREAD =====
-        evaluation_result = await asyncio.to_thread(
-            _evaluate_academic_summary_sync,
-            research_topic,
-            running_summary,
-            academic_sources
-        )
-        # ===== END THREAD EXECUTION =====
-        
-        return evaluation_result
-    
-    else:
-        print("\n⏭️  No academic evaluation performed. Continuing...\n")
-        return {
-            "completed": False,
-            "status": "SKIPPED"
-        }
-
-
-# ===== MODIFIED finalize_academic_summary =====
-async def finalize_academic_summary(state, config):
-    """
-    Modified finalize_academic_summary that includes comprehensive evaluation.
-    Uses same 4 RAG metrics as web search for consistency:
-    Faithfulness, Answer Relevancy, Contextual Relevancy, Hallucination.
-    """
-    
-    # Your existing finalize logic
-    all_sources = state.academic_source_content if state.academic_source_content else "No academic sources"
-    final_summary = f"## Academic Summary\n\n{state.running_summary}\n\n### Sources:\n{all_sources}"
-    
-    # ===== COMPREHENSIVE EVALUATION (using thread-based approach) =====
-    evaluation_result = await evaluate_academic_summary_with_interrupt(
-        research_topic=state.research_topic,
-        running_summary=state.running_summary,
-        academic_sources=[state.academic_source_content] if state.academic_source_content else []
-    )
-    # ===== END EVALUATION =====
-    
-    await copilotkit_exit(config)
-    
-    return {
-        "running_summary": final_summary,
-        "evaluation_results": evaluation_result
-    }
 
 
 
@@ -1423,8 +632,6 @@ Think about WHAT DOCUMENTATION SECTIONS would be needed to answer this question.
 
 
 
-import json
-from typing import List
 
 def rank_queries_by_relevance(
     user_question: str,
