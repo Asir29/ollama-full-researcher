@@ -41,7 +41,7 @@ class SummaryState:
     messages: Annotated[list[AnyMessage], add_messages]
     user_feedback: str = field(default=None) # to store user feedback
     user_feedback_processed : str = field(default=None) # to store user feedback after llm processes it
-    user_specified_files: str = field(default=None)
+    user_specified_file: str = field(default=None)
     
     sandbox_feedback_pyright: str = field(default=None)
     sandbox_feedback_execution: str = field(default=None)

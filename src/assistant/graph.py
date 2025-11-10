@@ -556,14 +556,35 @@ def generate_optimized_search_queries(
     """
     
 
-    # --- Helper: Safe JSON extraction ---
-    def safe_llm_json(content: str):
+import json
+import re
+
+def safe_llm_json(content: str):
+    """Safely parse JSON with multiple fallback strategies."""
+    content = content.strip()
+    
+    # Remove possible markdown code fences like ```json ... ```
+    if content.startswith("```"):
+        content = re.sub(r"^```[a-zA-Z]*\n?", "", content)
+        content = re.sub(r"\n?```$", "", content)
         content = content.strip()
-        if content.startswith("```"):
-            content = re.sub(r"^```[a-zA-Z]*\n?", "", content)
-            content = re.sub(r"\n?```$", "", content)
-            content = content.strip()
+    
+    # Try direct JSON parsing
+    try:
         return json.loads(content)
+    except json.JSONDecodeError:
+        # Try to extract JSON object from within text
+        json_match = re.search(r"\{.*\}", content, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group(0))
+            except json.JSONDecodeError:
+                pass
+        # If everything fails, raise the original error
+        raise
+
+
+
 
     query_generation_prompt = f"""You are an expert at generating comprehensive search queries for machine learning documentation retrieval.
 
@@ -937,7 +958,20 @@ EXTRACTED PATTERNS:
 - Functions: {', '.join(patterns['functions'][:10])}
 - Modules: {', '.join(patterns['modules'][:10])}
 
-Generate complete, working snnTorch code that addresses the request.
+OUTPUT FORMAT (CRITICAL):
+Structure your code with # FILE: markers:
+
+# FILE: filename.py
+[code]
+
+# FILE: another.py
+[code]
+
+Rules:
+- Each file starts: # FILE: filename.py
+- Put code after marker
+- NO markdown fences (no ```)
+- NO visual separators
 
 Return JSON: {{"code": "...", "confidence": 0.95, "queries_used": 10}}
 """
@@ -959,8 +993,24 @@ Return JSON: {{"code": "...", "confidence": 0.95, "queries_used": 10}}
     print("✓ Parsing response...")
 
     try:
+       
+
         content = safe_llm_json(response.content)
-        code = content.get("code", "")
+        code_field = content.get("code", "")
+        
+        # Handle different code field formats
+        if isinstance(code_field, dict):
+            # Convert dict format {"filename.py": "content"} to FILE markers
+            file_parts = []
+            for filename, file_content in code_field.items():
+                if not filename.endswith('.py'):
+                    filename = filename + '.py'
+                file_parts.append(f"# FILE: {filename}\n{file_content}")
+            code = "\n\n".join(file_parts)
+        else:
+            code = code_field  # Already a string
+
+
         confidence = content.get("confidence", 0.0)
         print(f"   ✓ Confidence: {confidence*100:.0f}%")
         print(f"   ✓ Code length: {len(code)} characters\n")
@@ -1212,7 +1262,7 @@ GENERATION REQUIREMENTS:
    - Full training with optimizer and scheduler
 
 2. FORMAT OUTPUT:
-   - Start each file with: FILE filename.py
+    - Start each file with: # FILE: filename.py  ← CORRECT!
    - Include complete, working Python code
    - NO YAML, NO hardcoded values, NO separate files
    - Strictly follow NNI v2.0 API
@@ -1255,31 +1305,60 @@ NO MARKDOWN, NO EXPLANATIONS - ONLY VALID JSON WITH CODE KEY.
     # ============================================================
     # STEP 8: Parse response with integrated extraction (INLINE)
     # ============================================================
-    
+
     print("[NNI] Parsing response...")
-    
+
     code = ""
     try:
-        # ✓ CRITICAL FIX: Use safe JSON extraction (LIKE snnTorch)
+        # ✓ CRITICAL FIX: Extract JSON first, THEN parse code field
         parse_content = response_text.strip()
-        if parse_content.startswith('```'):
-            parse_content = re.sub(r'```[a-zA-Z]*', '', parse_content)
-            parse_content = re.sub(r'```', '', parse_content)
+
+        # Step 1: Remove markdown wrapper if present
+        if parse_content.startswith("```"):
+            # Remove opening fences like ```json, ```python, or just ```
+            parse_content = re.sub(r"^```(?:json|python)?\s*", "", parse_content)
+            # Remove closing fences like ```
+            parse_content = re.sub(r"\s*```$", "", parse_content)
             parse_content = parse_content.strip()
-        
-        response_data = json.loads(parse_content)
+
+        # Step 2: Parse JSON to get code field
+        try:
+            response_data = json.loads(parse_content)
+        except json.JSONDecodeError:
+            # Fallback: try to extract JSON object manually
+            json_match = re.search(r"\{.*\}", parse_content, re.DOTALL)
+            if json_match:
+                response_data = json.loads(json_match.group(0))
+            else:
+                raise json.JSONDecodeError("No valid JSON found", parse_content, 0)
+
+        # Step 3: Get code field from JSON
         code = response_data.get("code", "")
-        
-        if not code:
+
+        # Step 4: Unescape newlines if needed
+        if "\\n" in code:
+            code = code.replace("\\n", "\n")
+
+        # Step 5: Validate
+        if not code or len(code.strip()) == 0:
             print("[NNI] ⚠️ No code in response")
-            return {"code": "", "error": "Empty code in response"}
-        
-        print(f"[NNI] ✓ Extracted code: {len(code)} chars")
-    
+            print(f"[NNI] Response data keys: {list(response_data.keys())}")
+            result = {"code": "", "error": "Empty code in response"}
+        else:
+            print(f"[NNI] ✓ Extracted code: {len(code)} chars")
+            print(f"[NNI] ✓ First 100 chars: {code[:100]}")
+            result = {"code": code, "error": ""}
+
     except json.JSONDecodeError as e:
         print(f"[NNI] ❌ JSON parse error: {e}")
-        print(f"[NNI] Response text: {response_text[:500]}")
-        return {"code": "", "error": str(e)}
+        print(f"[NNI] Response text preview: {response_text[:200]}")
+        print(f"[NNI] Parsed content preview: {parse_content[:200]}")
+        result = {"code": "", "error": f"JSON parse error: {str(e)}"}
+
+    except Exception as e:
+        print(f"[NNI] ❌ Unexpected error: {e}")
+        print(f"[NNI] Response type: {type(response_text)}")
+        result = {"code": "", "error": f"Unexpected error: {str(e)}"}
     
     # ============================================================
     # STEP 9: Unescape newlines and handle escaping (INLINE)
@@ -1494,16 +1573,24 @@ def generate_code(config: RunnableConfig, state: SummaryState):
             result = snnTorch_agent(query, config, state)
         elif tool_name == "nni_agent":
             result = nni_agent(query, config, state)
-        else:
-            print(f"   ❌ Unknown tool: {tool_name}")
-            continue
         
         if not result:
             print(f"   ❌ Tool returned empty result")
             continue
         
-        # Extract code from result
-        code = result.get("code", "") if isinstance(result, dict) else str(result)
+        # Extract code properly
+        if isinstance(result, dict):
+            code = result.get("code", "")
+            if result.get("error"):
+                print(f"   ⚠️  Agent error: {result['error']}")
+                continue  # Skip this tool if it failed
+        else:
+            code = str(result)
+        
+        if not code or len(code) < 10:
+            print(f"   ❌ Tool returned insufficient code ({len(code)} chars)")
+            continue
+
         
         # VALIDATION: Check FILE marker format
         import re
@@ -1513,11 +1600,13 @@ def generate_code(config: RunnableConfig, state: SummaryState):
         
         if len(file_markers) == 0:
             print(f"   ⚠️  WARNING: No # FILE: markers found!")
-            print(f"   WRAPPING output with default marker...")
-            code = f"# FILE: {tool_name.lower()}_output.py\n{code}"
-            file_markers = [f"{tool_name.lower()}_output.py"]
+            print(f"   Code will be wrapped in integration phase")
+            # DO NOT wrap here - let integration handle it
+            # Just accept the code as-is
+            file_markers = ["unknown"]
         
         print(f"   ✓ Detected {len(file_markers)} file(s): {file_markers}")
+
         tool_outputs[tool_name] = code
 
     if not tool_outputs:
@@ -1533,12 +1622,13 @@ def generate_code(config: RunnableConfig, state: SummaryState):
     # INTEGRATION STEP: Have orchestrator combine the code
     integration_prompt = f"""You are a code integration expert. You have received code from multiple specialized agents.
 
-    Your task:
-    - Analyze all the code components provided
-    - Create a SINGLE, COHERENT, INTEGRATED code solution
-    - Ensure proper imports, no duplicates, correct dependencies
-    - Make sure all components work together seamlessly
-    - Add necessary glue code to connect the components
+    CRITICAL FORMATTING RULES:
+    - Output code with # FILE: markers for each file
+    - Format: # FILE: filename.py on its own line
+    - Preserve original multi-file structure
+    - NO markdown code fences
+    - NO explanatory text
+    - ONLY Python code with FILE markers
 
     IMPORTANT: Structure your code with file markers like this:
 
@@ -2002,7 +2092,7 @@ def upload_and_execute_in_e2b(
     code_str: str,
     main_file: Optional[str] = None,
     install_packages: Optional[List[str]] = None,
-    timeout_ms: int = 0,
+    timeout: int = 0,
     verbose: bool = True
 ) -> Dict:
     """
@@ -2012,7 +2102,7 @@ def upload_and_execute_in_e2b(
         code_str: Generated code with # FILE: markers
         main_file: Entry point filename (auto-detected if None)
         install_packages: List of packages to pip install
-        timeout_ms: Execution timeout in milliseconds
+        timeout: Execution timeout in milliseconds
         verbose: Print status messages
         
     Returns:
@@ -2101,7 +2191,7 @@ def upload_and_execute_in_e2b(
             print(f"📤 UPLOADING FILES")
         
         upload_dir = "/home/user"
-        sandbox.commands.run(f"mkdir -p {upload_dir}", timeout_ms=0)
+        sandbox.commands.run(f"mkdir -p {upload_dir}", timeout=0)
         
         for filename, content in files.items():
             remote_path = f"{upload_dir}/{filename}"
@@ -2132,13 +2222,14 @@ def upload_and_execute_in_e2b(
         
         # exec_result = sandbox.commands.run(
         #     f"cd {upload_dir} && python {main_file}",
-        #     timeout_ms=timeout_ms
+        #     timeout=timeout
         # )
 
         exec_result = sandbox.commands.run(
-        f"python -c \"import sys; sys.path.insert(0, '/home/user'); exec(open('/home/user/{mainfile}').read())\"",
-        timeout_ms=timeout_ms
+            f"cd {upload_dir} && python {main_file}",
+            timeout=timeout
         )
+
 
         
         if verbose:
@@ -2192,6 +2283,9 @@ def check_code_sandbox(state: SummaryState, config: RunnableConfig):
     
     # Get code from state
     code = state.normalized_code if state.user_feedback_processed == "evaluation" else state.code
+
+    print("[SANDBOX] Converting relative imports to absolute...\n")
+    code = code.replace('from .', 'from ')
     
     # Extract imports
     print("Extracting dependencies...\n")
@@ -2231,7 +2325,7 @@ Do NOT include explanations or code fences. Just imports."""
         code_str=cleaned_code,
         main_file=None,
         install_packages=packages,
-        timeout_ms=120000,
+        timeout=0,
         verbose=True
     )
     
@@ -2621,34 +2715,33 @@ Return ONLY valid JSON. No markdown. No extra text.
 """
 
     response = agent.run(prompt)
-    
-    
-    
+
     try:
-        # Extract JSON from response
-        json_match = re.search(r'\{.*\}', response.content, re.DOTALL)
+        # Use YOUR function here!
+        content = remove_think_tags(response.content).strip()
+        
+        # Extract JSON
+        json_match = re.search(r'\{.*\}', content, re.DOTALL)
         if json_match:
             response_dict = json.loads(json_match.group())
         else:
-            response_dict = json.loads(response.content)
-        
+            response_dict = json.loads(content)
+
         decision = response_dict.get('response', 'approve')
-        file_name = response_dict.get('file_name', None)  # ← Gets filename if present
-        
-        print(f"Decision: {decision}")
+        file_name = response_dict.get('file_name', None)
+
+        print(f"✓ Decision: {decision}")
         if file_name:
-            print(f"File to execute: {file_name}")
-        
-        # Store in state
+            print(f"✓ File to execute: {file_name}")
+
         state.user_feedback_processed = decision
-        state.user_specified_file = file_name  # ← NEW: Store the filename
-        
-    except json.JSONDecodeError as e:
-        print(f"Failed to parse response: {e}")
-        print(f"Raw response: {response.content}")
+        state.user_specified_file = file_name
+
+    except (json.JSONDecodeError, AttributeError) as e:
+        print(f"⚠️ Failed to parse response: {e}")
         state.user_feedback_processed = 'approve'
         state.user_specified_file = None
-    
+
     return state
 
 def collect_feedback_evaluation(state: SummaryState, config: RunnableConfig):
