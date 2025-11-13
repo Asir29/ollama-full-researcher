@@ -2145,6 +2145,46 @@ def generate(state: SummaryState, config: RunnableConfig):
     # Solution
     code = generate_code(config, state)
 
+    
+    # ===== COMPOSER AGENT (MINIMAL) =====
+    print("--- PHASE 3: CODE COMPOSITION AND FIXING ---")
+    
+    # STEP 1: Build prompt
+    composer_prompt = f"""You are a code composer. Fix this Python code to make it executable.
+    
+CODE:
+{code}
+
+Tasks:
+1. Fix syntax errors
+2. Ensure imports work
+3. Wire connections between files
+4. Return ONLY valid JSON:
+
+{{"code": "[COMPLETE fixed code with # FILE: markers - use REGULAR quotes, NO backslashes]"}}
+
+CRITICAL: Code inside "code" field should be raw Python, not escaped!
+
+
+"""
+    
+    # STEP 2: Call agent
+    composer_agent = Agent(
+        model=Ollama(id="gpt-oss:20b"),
+        tools=[],
+        show_tool_calls=False,
+        use_json_mode=True,
+    )
+    response = composer_agent.run(composer_prompt)
+    
+    # STEP 3: Extract code
+    import json
+    try:
+        result = json.loads(response.content)
+        composed_code = result.get("code", code)
+    except:
+        composed_code = code
+
     output_directory = "./generated_code"
     #output_filename = "latest_generated_code.py"  
 
@@ -2153,12 +2193,12 @@ def generate(state: SummaryState, config: RunnableConfig):
     output_filename = f"generated_code_{timestamp}.py"
 
     # To overwrite the file each time:
-    save_code_to_file(code, output_directory, output_filename, mode="w")
+    save_code_to_file(composed_code, output_directory, output_filename, mode="w")
 
-    state.code = code
+    state.code = composed_code
     #state.fixed_code = code # save for later sandboxing
 
-    print("CODE SOLUTION:\n", code)
+    print("CODE SOLUTION:\n", composed_code, "...\n")
     
 
     
