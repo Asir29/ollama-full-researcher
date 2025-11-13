@@ -36,6 +36,8 @@ import numpy as np              # Numeric arrays and operations
 import torch                    # PyTorch (GPU/CPU tensors, deep learning)
 torch.cuda.empty_cache()        # Clear CUDA memory if needed
 from datetime import datetime
+from typing import Dict, Any, Optional, Tuple
+
 
 # -----------------------------
 # Global logging configuration
@@ -250,6 +252,249 @@ async def route_question(state: SummaryState, config: RunnableConfig):
 
 
 
+# ============================================
+# UNIVERSAL PARSING UTILITIES
+# Use these with ANY agent (nni, snnTorch, code_gen, etc.)
+# ============================================
+
+import json
+import re
+from typing import Dict, Any, Optional
+
+
+def normalize_code_escapes(text: str) -> str:
+    """
+    UNIVERSAL: Normalize ALL escape sequences in code string.
+    Works with any code string from any source.
+    
+    Handles both JSON escapes and raw markdown escapes consistently.
+    Safe to call multiple times (idempotent).
+    
+    Args:
+        text: Code string potentially with escaped sequences
+    
+    Returns:
+        Cleaned string with actual newlines instead of escaped sequences
+    
+    Examples:
+        normalize_code_escapes("line1\\nline2")  # → "line1\nline2"
+        normalize_code_escapes("tab\\there")      # → "tab\there"
+    """
+    if not isinstance(text, str):
+        return text
+    
+    # Replace common escape sequences
+    text = text.replace(r'\\n', '\\n')
+    text = text.replace(r'\\t', '\\t')
+    text = text.replace(r'\\r', '\\r')
+    text = text.replace(r'\\"', '"')
+    
+    return text
+
+
+def safe_parse_agent_response(response_text: str, verbose: bool = False) -> Dict[str, Any]:
+    """
+    UNIVERSAL: Parse ANY agent response with consistent validation and unescaping.
+    Works with nni_agent, snnTorch_agent, or any LLM-based agent.
+    
+    Tries multiple parsing strategies:
+    1. JSON parsing (most structured)
+    2. Markdown code block extraction
+    3. Raw text fallback
+    
+    Args:
+        response_text: Raw response from LLM
+        verbose: Print debug information
+    
+    Returns:
+        Guaranteed structure:
+        {
+            "code": str,           # Complete code with # FILE: markers
+            "summary": str,        # Description of generated code
+            "files": Dict,         # Extracted files {filename: content}
+            "error": str or None,  # Error message if parsing failed
+            "parse_method": str    # Which method succeeded (for debugging)
+        }
+    """
+    
+    if not response_text or not response_text.strip():
+        return {
+            "code": "",
+            "summary": "",
+            "files": {},
+            "error": "Empty response",
+            "parse_method": "none"
+        }
+    
+    # STEP 1: Strip outer markdown fences universally
+    parse_content = response_text.strip()
+    
+    if '```' in parse_content:
+        parts = parse_content.split('```')
+        if len(parts) >= 3:
+            inner = '```'.join(parts[1:-1])
+            lines = inner.split('\\n', 1)
+            
+            if lines and lines.strip() in ['json', 'python', 'py', 'txt', '']:
+                parse_content = lines if len(lines) > 1 else ""
+            else:
+                parse_content = inner
+    
+    parse_content = parse_content.strip()
+    
+    # STEP 2: Try JSON parsing first
+    if verbose:
+        print("[Parser] ATTEMPT 1: JSON parsing...")
+    
+    try:
+        data = json.loads(parse_content)
+        
+        if isinstance(data, dict):
+            # Map alternative field names to "code"
+            if "code" not in data:
+                for alt_name in ['script', 'code_content', 'python_code', 'content']:
+                    if alt_name in data:
+                        data["code"] = data.pop(alt_name)
+                        break
+            
+            # Normalize escapes in code field
+            if "code" in data and isinstance(data["code"], str):
+                data["code"] = normalize_code_escapes(data["code"])
+                if verbose:
+                    print(f"[Parser] ✓ JSON parsed, unescaped code ({len(data['code'])} chars)")
+            
+            # Ensure required fields
+            data.setdefault("summary", "Generated code")
+            data.setdefault("error", None)
+            data.setdefault("files", {})
+            data.setdefault("parse_method", "json")
+            
+            return data
+    except json.JSONDecodeError as e:
+        if verbose:
+            print(f"[Parser] ✗ JSON parse failed: {str(e)[:50]}")
+    
+    # STEP 3: Extract all code blocks from markdown
+    if verbose:
+        print("[Parser] ATTEMPT 2: Extracting markdown blocks...")
+    
+    code_blocks = re.findall(r'```[a-z]*\\n?(.*?)\\n?```', parse_content, re.DOTALL)
+    
+    if code_blocks:
+        unique_blocks = []
+        seen = set()
+        
+        for block in code_blocks:
+            normalized = normalize_code_escapes(block.strip())
+            
+            if normalized and normalized not in seen:
+                unique_blocks.append(normalized)
+                seen.add(normalized)
+        
+        if unique_blocks:
+            merged_code = '\\n\\n'.join(unique_blocks)
+            
+            if verbose:
+                print(f"[Parser] ✓ Extracted {len(unique_blocks)} blocks ({len(merged_code)} chars)")
+            
+            return {
+                "code": merged_code,
+                "summary": f"Extracted {len(unique_blocks)} code blocks from markdown",
+                "files": {},
+                "error": None,
+                "parse_method": "markdown_blocks"
+            }
+    
+    # STEP 4: Try raw text as code
+    if verbose:
+        print("[Parser] ATTEMPT 3: Using raw text as code...")
+    
+    code = normalize_code_escapes(parse_content)
+    
+    if code and len(code.strip()) > 50:
+        return {
+            "code": code,
+            "summary": "Raw response text",
+            "files": {},
+            "error": None,
+            "parse_method": "raw_text"
+        }
+    
+    # STEP 5: Complete failure
+    if verbose:
+        print("[Parser] ✗ All parsing attempts failed")
+    
+    return {
+        "code": "",
+        "summary": "",
+        "files": {},
+        "error": f"Could not parse response (len={len(response_text)})",
+        "parse_method": "failed"
+    }
+
+
+def extract_files_from_code(code: str, verbose: bool = False) -> Dict[str, str]:
+    """
+    UNIVERSAL: Extract individual files from code with # FILE: markers.
+    Works with any code string from any agent.
+    
+    Handles escaped and unescaped content consistently.
+    
+    Args:
+        code: Code string potentially with # FILE: section markers
+        verbose: Print debug information
+    
+    Returns:
+        Dict mapping filename to file content
+        If no markers found, returns {"main.py": code}
+    
+    Example:
+        code = '''# FILE: config.py
+        import nni
+        # FILE: train.py
+        def train():
+            pass'''
+        
+        files = extract_files_from_code(code)
+        # Returns: {
+        #     "config.py": "import nni",
+        #     "train.py": "def train():\n    pass"
+        # }
+    """
+    if not code or '# FILE:' not in code:
+        return {"main.py": code}
+    
+    pattern = r'^# FILE:\\s*(\\S+\\.py)\\s*$'
+    lines = code.split('\\n')
+    
+    files = {}
+    current_file = None
+    current_content = []
+    
+    for line in lines:
+        file_match = re.match(pattern, line)
+        
+        if file_match:
+            # Save previous file
+            if current_file and current_content:
+                files[current_file] = '\\n'.join(current_content).strip()
+            
+            # Start new file
+            current_file = file_match.group(1)
+            current_content = []
+        else:
+            # Add line to current file
+            if current_file is not None:
+                current_content.append(line)
+    
+    # Save last file
+    if current_file and current_content:
+        files[current_file] = '\\n'.join(current_content).strip()
+    
+    if verbose:
+        print(f"[FileExtractor] Found {len(files)} files: {list(files.keys())}")
+    
+    return files if files else {"main.py": code}
 
 
 
@@ -538,27 +783,6 @@ def search_relevant_sources(state: SummaryState, config: RunnableConfig):
     return {"status": "vectorstore_created"}
 
 
-def generate_optimized_search_queries(
-    user_question: str,
-    num_queries: int = 10,
-    model_id: str = "gpt-oss:20b"
-) -> list:
-    """
-    Generate diverse, optimized search queries based on user question.
-    
-    Args:
-        user_question: The original user request
-        num_queries: Number of queries to generate (default 10)
-        model_id: LLM model to use
-        
-    Returns:
-        list: Optimized search queries ranked by relevance
-    """
-    
-
-import json
-import re
-
 def safe_llm_json(content: str):
     """Safely parse JSON with multiple fallback strategies."""
     content = content.strip()
@@ -585,8 +809,37 @@ def safe_llm_json(content: str):
 
 
 
+def generate_optimized_search_queries(
+    user_question: str,
+    agent_type: str = "general",  # ← ADD THIS LINE
+    num_queries: int = 6,
+    model_id: str = "gpt-oss:20b"
+) -> list:
 
-    query_generation_prompt = f"""You are an expert at generating comprehensive search queries for machine learning documentation retrieval.
+    """
+    Generate diverse, optimized search queries based on user question.
+    
+    Args:
+        user_question: The original user request
+        num_queries: Number of queries to generate (default 10)
+        model_id: LLM model to use
+        
+    Returns:
+        list: Optimized search queries ranked by relevance
+    """
+    
+    query_context = {
+        "snntorch": "snnTorch library, neural networks, neurons, models, training, loss, backward",
+        "nni": "NNI framework, hyperparameter tuning, experiment configuration, dual-file pattern, SearchSpaceUpdater, ExperimentConfig, AlgorithmConfig, search space, _type _value",
+        "general": "machine learning, Python, optimization"
+    }
+    context_hint = query_context.get(agent_type, query_context["general"])
+
+
+    query_generation_prompt = f"""You are an expert at generating comprehensive search queries for {agent_type.upper()} documentation retrieval.
+
+Generate {num_queries} DIVERSE, SPECIFIC search queries for {agent_type} with focus on: {context_hint}
+
 
 Your task: Given a user's question, generate {num_queries} DIVERSE, SPECIFIC search queries that will retrieve all relevant documentation needed to answer the question.
 
@@ -789,6 +1042,225 @@ def expand_query_context(
     return expanded
 
 
+def normalize_code_escapes(text: str) -> str:
+    """
+    Normalize ALL escape sequences in code string.
+    Handles both JSON escapes and raw markdown escapes consistently.
+
+    Args:
+        text: Code string potentially with escaped sequences
+
+    Returns:
+        Cleaned string with actual newlines instead of escaped sequences
+    """
+    if not isinstance(text, str):
+        return text
+
+    # Pattern 1: Literal backslash sequences in text
+    # This catches "\\n" (backslash + n) in raw strings from markdown
+    text = text.replace(r'\n', '\n')
+    text = text.replace(r'\t', '\t')
+    text = text.replace(r'\r', '\r')
+    text = text.replace(r'\\"', '\"')
+
+    return text
+
+
+def safe_parse_nni_response(response_text: str, verbose: bool = False) -> Dict[str, Any]:
+    """
+    Unified response parser with consistent validation and unescaping.
+    Replaces ATTEMPT 1-4 in the original function.
+
+    Tries multiple parsing strategies in order:
+    1. JSON parsing (most structured)
+    2. Markdown code block extraction
+    3. Raw text fallback
+
+    Args:
+        response_text: Raw response from LLM
+        verbose: Print debug information
+
+    Returns:
+        Dict with guaranteed structure:
+        {
+            "code": str,           # Complete code with # FILE: markers
+            "summary": str,        # Description of what was generated
+            "files": Dict,         # Extracted files {filename: content}
+            "error": str or None,  # Error message if parsing failed
+            "parse_method": str    # Which method succeeded (for debugging)
+        }
+    """
+
+    if not response_text or not response_text.strip():
+        return {
+            "code": "",
+            "summary": "",
+            "files": {},
+            "error": "Empty response",
+            "parse_method": "none"
+        }
+
+    # STEP 1: Strip outer markdown fences universally
+    parse_content = response_text.strip()
+
+    if '```' in parse_content:
+        # Remove code fence markers
+        parts = parse_content.split('```')
+        if len(parts) >= 3:
+            # Assumes: (before)``` (language/content) (content) ```(after)
+            inner = '```'.join(parts[1:-1])  # Join all middle parts
+            lines = inner.split('\n', 1)
+
+            # Skip language identifier line if present
+            if lines and lines[0].strip() in ['json', 'python', 'py', 'txt', '']:
+                parse_content = lines[1] if len(lines) > 1 else ""
+            else:
+                parse_content = inner
+
+    parse_content = parse_content.strip()
+
+    # STEP 2: Try JSON parsing first
+    if verbose:
+        print("[Parser] ATTEMPT 1: JSON parsing...")
+
+    try:
+        data = json.loads(parse_content)
+
+        if isinstance(data, dict):
+            # Map alternative field names to "code"
+            if "code" not in data:
+                for alt_name in ['script', 'code_content', 'python_code', 'content']:
+                    if alt_name in data:
+                        data["code"] = data.pop(alt_name)
+                        break
+
+            # Normalize escapes in code field
+            if "code" in data and isinstance(data["code"], str):
+                data["code"] = normalize_code_escapes(data["code"])
+                if verbose:
+                    print(f"[Parser] ✓ JSON parsed, unescaped code ({len(data['code'])} chars)")
+
+            # Ensure required fields
+            data.setdefault("summary", "Generated code")
+            data.setdefault("error", None)
+            data.setdefault("files", {})
+            data.setdefault("parse_method", "json")
+
+            return data
+    except json.JSONDecodeError as e:
+        if verbose:
+            print(f"[Parser] ✗ JSON parse failed: {str(e)[:50]}")
+
+    # STEP 3: Extract all code blocks from markdown
+    if verbose:
+        print("[Parser] ATTEMPT 2: Extracting markdown blocks...")
+
+    code_blocks = re.findall(r'```[a-z]*\n?(.*?)\n?```', parse_content, re.DOTALL)
+
+    if code_blocks:
+        # Normalize and deduplicate blocks
+        unique_blocks = []
+        seen = set()
+
+        for block in code_blocks:
+            normalized = normalize_code_escapes(block.strip())
+
+            if normalized and normalized not in seen:
+                unique_blocks.append(normalized)
+                seen.add(normalized)
+
+        if unique_blocks:
+            merged_code = '\n\n'.join(unique_blocks)
+
+            if verbose:
+                print(f"[Parser] ✓ Extracted {len(unique_blocks)} blocks ({len(merged_code)} chars)")
+
+            return {
+                "code": merged_code,
+                "summary": f"Extracted {len(unique_blocks)} code blocks from markdown",
+                "files": {},
+                "error": None,
+                "parse_method": "markdown_blocks"
+            }
+
+    # STEP 4: Try raw text as code
+    if verbose:
+        print("[Parser] ATTEMPT 3: Using raw text as code...")
+
+    code = normalize_code_escapes(parse_content)
+
+    if code and len(code.strip()) > 50:
+        return {
+            "code": code,
+            "summary": "Raw response text",
+            "files": {},
+            "error": None,
+            "parse_method": "raw_text"
+        }
+
+    # STEP 5: Complete failure
+    if verbose:
+        print("[Parser] ✗ All parsing attempts failed")
+
+    return {
+        "code": "",
+        "summary": "",
+        "files": {},
+        "error": f"Could not parse response (len={len(response_text)})",
+        "parse_method": "failed"
+    }
+
+
+def extract_files_from_code(code: str, verbose: bool = False) -> Dict[str, str]:
+    """
+    Extract individual files from code with # FILE: markers.
+    Handles escaped and unescaped content consistently.
+
+    Args:
+        code: Code string potentially with # FILE: section markers
+        verbose: Print debug information
+
+    Returns:
+        Dict mapping filename to file content
+    """
+    if not code or '# FILE:' not in code:
+        return {"main.py": code}
+
+    # Pattern to extract FILE sections
+    pattern = r'^# FILE:\s*(\S+\.py)\s*$'
+    lines = code.split('\n')
+
+    files = {}
+    current_file = None
+    current_content = []
+
+    for line in lines:
+        file_match = re.match(pattern, line)
+
+        if file_match:
+            # Save previous file
+            if current_file and current_content:
+                files[current_file] = '\n'.join(current_content).strip()
+
+            # Start new file
+            current_file = file_match.group(1)
+            current_content = []
+        else:
+            # Add line to current file
+            if current_file is not None:
+                current_content.append(line)
+
+    # Save last file
+    if current_file and current_content:
+        files[current_file] = '\n'.join(current_content).strip()
+
+    if verbose:
+        print(f"[FileExtractor] Found {len(files)} files: {list(files.keys())}")
+
+    return files if files else {"main.py": code}
+
+
+
 # ------------------ Specialized Agent: snnTorch_agent ------------------
 def snnTorch_agent(question: str, config: RunnableConfig, state: SummaryState):
     """
@@ -832,7 +1304,7 @@ def snnTorch_agent(question: str, config: RunnableConfig, state: SummaryState):
 User Question:
 {question}
 
-Generate 10 diverse, focused search queries covering architecture, parameters, training, modules, and usage patterns.
+Generate 6 diverse, focused search queries covering architecture, parameters, training, modules, and usage patterns.
 
 Return ONLY a JSON array of query strings:
 ["query1", "query2", ..., "query10"]
@@ -933,16 +1405,16 @@ Focus on:
     print(f"\n   Total retrieved: {total_docs} documents")
     print(f"   Context size: {len(snn_context):,} characters\n")
 
-    # STEP 5: Extract patterns for prompt conditioning
-    patterns = {
-        "classes": list(set(re.findall(r"class\s+(\w+)\s*[:\(]", snn_context))),
-        "functions": list(set(re.findall(r"def\s+(\w+)\s*\(", snn_context)))[:10],
-        "modules": list(set(re.findall(r"(?:import|from)\s+([\w\.]+)", snn_context))),
-    }
+    # # STEP 5: Extract patterns for prompt conditioning
+    # patterns = {
+    #     "classes": list(set(re.findall(r"class\s+(\w+)\s*[:\(]", snn_context))),
+    #     "functions": list(set(re.findall(r"def\s+(\w+)\s*\(", snn_context)))[:10],
+    #     "modules": list(set(re.findall(r"(?:import|from)\s+([\w\.]+)", snn_context))),
+    # }
 
-    print(f"   ✓ Classes: {len(patterns['classes'])} - {patterns['classes'][:5]}")
-    print(f"   ✓ Functions: {len(patterns['functions'])} - {patterns['functions'][:5]}")
-    print(f"   ✓ Modules: {len(patterns['modules'])} - {patterns['modules'][:5]}\n")
+    # print(f"   ✓ Classes: {len(patterns['classes'])} - {patterns['classes'][:5]}")
+    # print(f"   ✓ Functions: {len(patterns['functions'])} - {patterns['functions'][:5]}")
+    # print(f"   ✓ Modules: {len(patterns['modules'])} - {patterns['modules'][:5]}\n")
 
     # STEP 6: Build prompt with ranked context
     prompt = f"""You are a snnTorch code generation assistant.
@@ -953,10 +1425,6 @@ RANKED DOCUMENTATION (most relevant first):
 
 {snn_context[:8000]}
 
-EXTRACTED PATTERNS:
-- Classes: {', '.join(patterns['classes'][:10])}
-- Functions: {', '.join(patterns['functions'][:10])}
-- Modules: {', '.join(patterns['modules'][:10])}
 
 OUTPUT FORMAT (CRITICAL):
 Structure your code with # FILE: markers:
@@ -973,7 +1441,7 @@ Rules:
 - NO markdown fences (no ```)
 - NO visual separators
 
-Return JSON: {{"code": "...", "confidence": 0.95, "queries_used": 10}}
+Return JSON: {{"code": "...", "confidence": 0.95, "queries_used": 6}}
 """
 
     # STEP 7: Generate code with LLM
@@ -989,35 +1457,35 @@ Return JSON: {{"code": "...", "confidence": 0.95, "queries_used": 10}}
     print("   ✓ LLM generation complete\n")
 
     # STEP 8: Parse and return
-    print("Raw LLM response:\n", response.content[:1000], "...\n")
+    print("Raw LLM response:\n", response.content, "...\n")
     print("✓ Parsing response...")
+    
+    parse_result = safe_parse_agent_response(response.content, verbose=True)
+    
+    if parse_result["error"] is not None:
+        print(f"❌ Parsing failed: {parse_result['error']}")
+        return {
+            "code": "",
+            "confidence": 0.0,
+            "queries_used": len(ranked_queries) if 'ranked_queries' in locals() else 0,
+            "error": parse_result["error"]
+        }
+    
+    code = parse_result["code"]
+    files = extract_files_from_code(code, verbose=True)
+    
+    print(f"✓ Parsed via: {parse_result['parse_method']}")
+    print(f"✓ Code length: {len(code):,} chars")
+    
+    return {
+        "code": code,
+        "files": files,
+        "summary": parse_result.get("summary", "Generated code"),
+        "confidence": 0.95,
+        "queries_used": len(ranked_queries) if 'ranked_queries' in locals() else 0,
+        "error": None
+    }
 
-    try:
-       
-
-        content = safe_llm_json(response.content)
-        code_field = content.get("code", "")
-        
-        # Handle different code field formats
-        if isinstance(code_field, dict):
-            # Convert dict format {"filename.py": "content"} to FILE markers
-            file_parts = []
-            for filename, file_content in code_field.items():
-                if not filename.endswith('.py'):
-                    filename = filename + '.py'
-                file_parts.append(f"# FILE: {filename}\n{file_content}")
-            code = "\n\n".join(file_parts)
-        else:
-            code = code_field  # Already a string
-
-
-        confidence = content.get("confidence", 0.0)
-        print(f"   ✓ Confidence: {confidence*100:.0f}%")
-        print(f"   ✓ Code length: {len(code)} characters\n")
-        return {"code": code, "confidence": confidence, "queries_used": 10}
-    except Exception as e:
-        print(f"   ❌ Semantic parse error: {e}\n")
-        return {"code": f"ERROR: {str(e)}", "confidence": 0.0, "queries_used": 10}
 
 
 
@@ -1028,403 +1496,253 @@ Return JSON: {{"code": "...", "confidence": 0.95, "queries_used": 10}}
 
 
 # ------------------ Specialized Agent: nni_agent ------------------
-# ============================================================================
-# IMPROVED NNI_AGENT FUNCTION ONLY - DROP-IN REPLACEMENT
-# ============================================================================
 
+def nni_agent(question: str, config: RunnableConfig, state: SummaryState) -> Dict[str, Any]:
+    """
+    Enhanced NNI Agent with unified parsing for consistent response handling.
 
-def nni_agent(question: str, config: RunnableConfig, state: SummaryState):
+    Replaces the multi-attempt parsing logic with a single robust parser
+    that handles all escape sequence combinations.
+
+    Args:
+        question: User question
+        config: Runnable configuration
+        state: Current state with code, files, summary
+
+    Returns:
+        Dict with:
+        - code: String with all Python code
+        - files: Dict mapping filenames to content
+        - summary: Description of what was generated
+        - error: Error message if failed, None if successful
     """
-    Generates NNI experiment configuration with FULLY INTEGRATED response parsing.
-    Everything is inline - no separate helper functions.
-    Uses the EXACT SAME PATTERN as snnTorch agent.
-    """
-    
+
     print("=" * 80)
-    print("NNI AGENT - WITH INTEGRATED PARSING")
+    print("NNI AGENT - UNIFIED PARSING (FIXED)")
     print("=" * 80)
-    
-    # ============================================================
+
     # STEP 1: Initialize vectorstore
-    # ============================================================
-    
+    print("[NNI] Initializing vectorstore...")
     try:
         embedding_model = SentenceTransformerEmbeddings("mchochlov/codebert-base-cd-ft")
-    except:
+    except Exception:
         embedding_model = SentenceTransformerEmbeddings("all-MiniLM-L6-v2")
-    
+
     try:
         vectorstore = Chroma(
             embedding_function=embedding_model,
             collection_name="nni-docs",
-            persist_directory="./chroma_nni_docs"
+            persist_directory=".chroma/nni_docs"
         )
         print("[NNI] ✓ Vectorstore initialized")
     except Exception as e:
-        print(f"[NNI] ⚠️ Warning: Could not load vectorstore: {e}")
+        print(f"[NNI] ⚠️ Warning: {e}")
         vectorstore = None
-    
-    # ============================================================
-    # STEP 2: Generate optimized search queries (INLINE)
-    # ============================================================
-    
+
+    # STEP 2: Generate search queries
     print("[NNI] Generating optimized search queries...")
-    
-    query_generation_prompt = f"""You are an expert at generating comprehensive search queries for NNI documentation retrieval.
-
-Your task: Given a user's question, generate 10 DIVERSE, SPECIFIC search queries that will retrieve all relevant documentation needed to answer the question.
-
-Requirements:
-1. Each query should target a DIFFERENT aspect of the problem
-2. Queries should be specific (include NNI concepts, parameter names, concrete patterns)
-3. Order queries by importance (most critical first)
-4. Avoid duplicate queries
-5. Cover configuration, search spaces, tuning strategies, and training integration
-
-User Question: {question}
-
-Format: Return ONLY a JSON array of query strings:
-["query1", "query2", "query3", ...]
-"""
-    
-    generate_agent = Agent(
-        model=Ollama(id="gpt-oss:20b"),
-        tools=[],
-        show_tool_calls=False,
-        use_json_mode=True,
+    search_queries = generate_optimized_search_queries(
+        user_question=question,
+        agent_type="nni",
+        num_queries=6,
+        model_id="gpt-oss:20b"
     )
-    
-    search_queries = []
-    try:
-        gen_response = generate_agent.run(query_generation_prompt)
-        # ✓ KEY: Always extract .content first (LIKE snnTorch)
-        gen_content = gen_response.content.strip()
-        if gen_content.startswith('```'):
-            gen_content = re.sub(r'```[a-zA-Z]*', '', gen_content)
-            gen_content = re.sub(r'```', '', gen_content)
-            gen_content = gen_content.strip()
-        search_queries = json.loads(gen_content)
-        
-        if not isinstance(search_queries, list) or len(search_queries) == 0:
-            raise ValueError("Empty or invalid query list")
-        
-        print(f"[NNI] ✓ Generated {len(search_queries)} search queries")
-        for i, q in enumerate(search_queries, 1):
-            print(f"  [{i}] {q[:60]}...")
-    
-    except Exception as e:
-        print(f"[NNI] ❌ Query generation failed: {e}")
-        search_queries = [
-            "NNI experiment config YAML example using TPE tuner total_trials 20 parallel_trials 2 time_limit 2h",
-            "NNI TPE tuner search space definition learning_rate categorical [0.0001,0.0005,0.001,0.01]",
-            "NNI TPE tuner search space batch_size integer [32,64,128,256]",
-            "NNI TPE tuner search space hidden_units integer [64,128,256,512]",
-            "NNI uniform search space dropout_rate 0.1-0.5 example definition",
-            "NNI uniform search space weight_decay 0.0-0.01 example definition",
-            "Using nni.get_next_parameter() in train.py to load hyperparameters",
-            "Reporting epoch accuracy to NNI via nni.report_intermediate_result in train.py",
-            "Integrating model.py with NNI hyperparameters and training loop",
-            "NNI tuning workflow architecture: tuner, trainer, experiment, search space overview"
-        ]
-    
-    # ============================================================
-    # STEP 3: Rank queries by relevance (INLINE)
-    # ============================================================
-    
+
+    # STEP 3: Rank queries
     print("[NNI] Ranking queries by relevance...")
-    
     ranking_prompt = f"""You are an expert at ranking search query relevance.
 
-User Question: {question}
+Question: {question}
 
 Candidate Queries:
-"""
-    for i, query in enumerate(search_queries, 1):
-        ranking_prompt += f"{i}. {query}\n"
-    
-    ranking_prompt += """Your task: Rank these queries by RELEVANCE to answering the user's question.
+{chr(10).join(f"{i}. {q}" for i, q in enumerate(search_queries, 1))}
 
+Your task: Rank these queries by RELEVANCE to answering the user's question.
 Return ONLY a JSON object:
-{
-  "ranked_queries": ["most_relevant_query", "second_most_relevant", ...],
-  "reasoning": "Brief explanation of ranking"
-}
+{{
+    "ranked_queries": ["most_relevant_query", "second_most_relevant", ...],
+    "reasoning": "Brief explanation of ranking"
+}}
 
 Focus on:
-- Core NNI concepts mentioned in the question
+- Core concepts mentioned in question
 - Implementation details needed
-- Configuration and training requirements
+- Training and evaluation requirements
 """
-    
-    rank_agent = Agent(
-        model=Ollama(id="gpt-oss:20b"),
-        tools=[],
-        show_tool_calls=False,
-        use_json_mode=True,
-    )
-    
+
+    rank_agent = Agent(model=Ollama(id="gpt-oss:20b"), tools=[], show_tool_calls=False)
+
     ranked_queries = search_queries
     try:
         rank_response = rank_agent.run(ranking_prompt)
-        # ✓ KEY: Always extract .content first (LIKE snnTorch)
         rank_content = rank_response.content.strip()
-        if rank_content.startswith('```'):
-            rank_content = re.sub(r'```[a-zA-Z]*', '', rank_content)
-            rank_content = re.sub(r'```', '', rank_content)
+
+        # Clean markdown if present
+        if rank_content.startswith("```"):
+            rank_content = re.sub(r"```[a-z]*", "", rank_content)
+            rank_content = re.sub(r"```", "", rank_content)
             rank_content = rank_content.strip()
+
         rank_result = json.loads(rank_content)
         ranked_queries = rank_result.get("ranked_queries", search_queries)
-        reasoning = rank_result.get("reasoning", "")
-        
         print(f"[NNI] ✓ Ranked {len(ranked_queries)} queries")
-        print(f"[NNI] Reasoning: {reasoning}")
-        for i, q in enumerate(ranked_queries, 1):
-            print(f"  [{i}] {q[:60]}...")
-    
     except Exception as e:
-        print(f"[NNI] ❌ Ranking failed: {e}")
-        ranked_queries = search_queries
-    
-    # ============================================================
-    # STEP 4: Multi-pass retrieval from vectorstore (INLINE)
-    # ============================================================
-    
+        print(f"[NNI] ⚠️ Ranking failed: {e}")
+
+    # STEP 4: Multi-pass retrieval
+    print("[NNI] Performing multi-pass retrieval...")
     nni_context = ""
-    total_docs = 0
-    
+
     if vectorstore:
-        print("[NNI] Performing multi-pass retrieval...")
-        retriever = vectorstore.as_retriever(search_kwargs={"k": 15})
-        
-        for i, query in enumerate(ranked_queries, 1):
-            try:
-                docs = retriever.get_relevant_documents(query)
+        try:
+            retriever = vectorstore.as_retriever(search_kwargs={"k": 15})
+            retrieved_docs = {}
+            total_docs = 0
+
+            for i, query in enumerate(ranked_queries, 1):
+                rank_score = 1.0 - (i - 1) * 0.05
+
+                try:
+                    docs = retriever.get_relevant_documents(query)
+                except Exception:
+                    docs = []
+
+                retrieved_docs[query] = docs
                 total_docs += len(docs)
-                print(f"[NNI]    {i}. Query: {query[:40]}... → {len(docs)} docs")
-                
-                for j, doc in enumerate(docs[:3], 1):
+                print(f"[NNI] Query {i}: {query[:50]}... → {len(docs)} docs (weight: {rank_score:.2f})")
+
+                for j, doc in enumerate(docs[:5], 1):
                     source = doc.metadata.get("source", "unknown")
-                    nni_context += f"\n[Ref {i}.{j} - {source}]\n{doc.page_content[:800]}\n---"
-            
-            except Exception as e:
-                print(f"[NNI] ⚠️ Error retrieving documents for query {i}: {e}")
-        
-        print(f"[NNI] ✓ Total context: {len(nni_context)} chars from {len(ranked_queries)} queries")
-    
-    # ============================================================
-    # STEP 5: Extract patterns from context (INLINE)
-    # ============================================================
-    
-    print("[NNI] Extracting patterns from context...")
-    
-    patterns_choice = list(set(re.findall(r"'_type':\s*'choice'[^}]*\[([^\]]+)\]", nni_context)))[:5]
-    patterns_quniform = list(set(re.findall(r"'_type':\s*'quniform'[^}]*\[([^\]]+)\]", nni_context)))[:5]
+                    nni_context += f"Query {i}.{j} - {source} - weight {rank_score:.2f}\n{doc.page_content[:600]}\n---\n"
 
-    
-    print(f"[NNI]    ✓ Found {len(patterns_choice)} choice patterns")
-    print(f"[NNI]    ✓ Found {len(patterns_quniform)} quniform patterns")
-    
-    # ============================================================
-    # STEP 6: Build generation prompt (INLINE)
-    # ============================================================
-    
+            print(f"[NNI] ✓ Retrieved {total_docs} documents")
+            print(f"[NNI] ✓ Context size: {len(nni_context):,} characters")
+        except Exception as e:
+            print(f"[NNI] ⚠️ Retrieval failed: {e}")
+
+    # STEP 5: Build LLM prompt
     print("[NNI] Building generation prompt...")
-    
-    prompt = f"""You are an NNI configuration expert.
 
-TASK: Generate production-grade NNI Python configuration.
+    prompt = f"""
+CRITICAL FORMAT REQUIREMENT:
+Your response MUST be EXACTLY ONE valid JSON object with this structure:
+{{
+    "code": "# FILE: config.py\n...\n# FILE: train.py\n...",
+    "summary": "Brief description of generated code"
+}}
 
-USER REQUEST: {question}
+RULES:
+1. EXACTLY 2 fields: code and summary
+2. NO markdown code blocks, NO explanations outside JSON
+3. ALL code in code field with # FILE: markers
+4. Must be parseable with json.loads()
+5. Each file section starts with # FILE: filename.py
 
-REFERENCE DOCUMENTATION (most relevant first):
-{nni_context[:3000]}
+---
 
-GENERATION REQUIREMENTS:
-1. Generate COMPLETE Python scripts with TWO sections:
+You are an NNI configuration expert. Your task:
 
-   SECTION 1 (config.py):
-   - Define search_space dict with 8 hyperparameters (mix choice and quniform)
-   - Export search_space to JSON file before experiment
-   - Set up argparse with 6 arguments
-   - Create ExperimentConfig with tuner, assessor, training_service
-   - Use AlgorithmConfig for TPE tuner and assessor
-   - Use LocalConfig for GPU execution
+{question}
 
-   SECTION 2 (train.py):
-   - Use nni.get_next_parameter() (v2.0 API)
-   - Retrieve all 8 hyperparameters
-   - Implement complete training loop with validation
-   - Report intermediate results with nni.report_intermediate_result()
-   - Report final result with nni.report_final_result()
-   - Include argparse integration
-   - Load MNIST data
-   - Define PyTorch model
-   - Full training with optimizer and scheduler
+CONTEXT (ranked by relevance):
+{nni_context[:5000]}
 
-2. FORMAT OUTPUT:
-    - Start each file with: # FILE: filename.py  ← CORRECT!
-   - Include complete, working Python code
-   - NO YAML, NO hardcoded values, NO separate files
-   - Strictly follow NNI v2.0 API
+Generate complete NNI configuration with:
+- config.py: Search space definition, experiment config, tuner setup
+- train.py: Training loop with NNI integration, metrics reporting
+- utils.py (if needed): Helper functions
 
-3. RETURN ONLY JSON:
-   {{
-     "code": "FILE config.py\\n...complete code...\\nFILE train.py\\n...complete code...",
-     "summary": "Brief description of generated configuration"
-   }}
-
-NO MARKDOWN, NO EXPLANATIONS - ONLY VALID JSON WITH CODE KEY.
+Format as pure JSON ONLY. No explanations or markdown.
 """
-    
-    print("[NNI] ✓ Prompt ready")
-    
-    # ============================================================
-    # STEP 7: Call LLM for code generation (INLINE WITH FIX)
-    # ============================================================
-    
+
+    # STEP 6: Call LLM
     print("[NNI] Calling LLM for code generation...")
-    
-    code_agent = Agent(
-        model=Ollama(id="gpt-oss:20b"),
-        tools=[],
-        show_tool_calls=False,
-        use_json_mode=True,
-    )
-    
-    response_text = ""
+
+    code_agent = Agent(model=Ollama(id="gpt-oss:20b"), tools=[], show_tool_calls=False, use_json_mode=True)
+
     try:
         response = code_agent.run(prompt)
-        # ✓ CRITICAL FIX: Always access .content first (LIKE snnTorch)
         response_text = response.content
+        print(response_text)
         print(f"[NNI] ✓ LLM response received ({len(response_text)} chars)")
-    
     except Exception as e:
         print(f"[NNI] ❌ LLM call failed: {e}")
-        return {"code": "", "error": str(e)}
-    
-    # ============================================================
-    # STEP 8: Parse response with integrated extraction (INLINE)
-    # ============================================================
+        return {
+            "code": "",
+            "files": {},
+            "summary": "",
+            "error": str(e)
+        }
 
-    print("[NNI] Parsing response...")
+    # STEP 7-8: UNIFIED PARSING WITH FIXED LOGIC
+    print("[NNI] Parsing response with unified parser...")
 
-    code = ""
-    try:
-        # ✓ CRITICAL FIX: Extract JSON first, THEN parse code field
-        parse_content = response_text.strip()
+    parse_result = safe_parse_nni_response(response_text, verbose=True)
 
-        # Step 1: Remove markdown wrapper if present
-        if parse_content.startswith("```"):
-            # Remove opening fences like ```json, ```python, or just ```
-            parse_content = re.sub(r"^```(?:json|python)?\s*", "", parse_content)
-            # Remove closing fences like ```
-            parse_content = re.sub(r"\s*```$", "", parse_content)
-            parse_content = parse_content.strip()
+    # Check for errors
+    if parse_result["error"] is not None:
+        print(f"[NNI] ❌ Parsing failed: {parse_result['error']}")
+        return {
+            "code": "",
+            "files": {},
+            "summary": "",
+            "error": parse_result["error"]
+        }
 
-        # Step 2: Parse JSON to get code field
-        try:
-            response_data = json.loads(parse_content)
-        except json.JSONDecodeError:
-            # Fallback: try to extract JSON object manually
-            json_match = re.search(r"\{.*\}", parse_content, re.DOTALL)
-            if json_match:
-                response_data = json.loads(json_match.group(0))
-            else:
-                raise json.JSONDecodeError("No valid JSON found", parse_content, 0)
+    code = parse_result["code"]
+    summary = parse_result.get("summary", "Generated NNI configuration")
+    parse_method = parse_result.get("parse_method", "unknown")
 
-        # Step 3: Get code field from JSON
-        code = response_data.get("code", "")
+    print(f"[NNI] ✓ Parsed via: {parse_method}")
+    print(f"[NNI] ✓ Code length: {len(code):,} chars")
+    print(f"[NNI] ✓ Summary: {summary}")
 
-        # Step 4: Unescape newlines if needed
-        if "\\n" in code:
-            code = code.replace("\\n", "\n")
+    # STEP 9: Validate schema
+    print("[NNI] Validating response schema...")
 
-        # Step 5: Validate
-        if not code or len(code.strip()) == 0:
-            print("[NNI] ⚠️ No code in response")
-            print(f"[NNI] Response data keys: {list(response_data.keys())}")
-            result = {"code": "", "error": "Empty code in response"}
-        else:
-            print(f"[NNI] ✓ Extracted code: {len(code)} chars")
-            print(f"[NNI] ✓ First 100 chars: {code[:100]}")
-            result = {"code": code, "error": ""}
+    if not isinstance(code, str) or len(code.strip()) == 0:
+        return {
+            "code": "",
+            "files": {},
+            "summary": summary,
+            "error": "Code field empty or invalid"
+        }
 
-    except json.JSONDecodeError as e:
-        print(f"[NNI] ❌ JSON parse error: {e}")
-        print(f"[NNI] Response text preview: {response_text[:200]}")
-        print(f"[NNI] Parsed content preview: {parse_content[:200]}")
-        result = {"code": "", "error": f"JSON parse error: {str(e)}"}
+    # STEP 10: Extract files consistently
+    print("[NNI] Extracting files from code...")
 
-    except Exception as e:
-        print(f"[NNI] ❌ Unexpected error: {e}")
-        print(f"[NNI] Response type: {type(response_text)}")
-        result = {"code": "", "error": f"Unexpected error: {str(e)}"}
-    
-    # ============================================================
-    # STEP 9: Unescape newlines and handle escaping (INLINE)
-    # ============================================================
-    
-    print("[NNI] Unescaping newlines...")
-    
-    code = code.replace("\\n", "\n")
-    code = code.replace("\\t", "\t")
-    code = code.replace('\\"', '"')
-    print(f"[NNI] ✓ Code unescaped: {len(code)} chars")
-    
-    # ============================================================
-    # STEP 10: Validate extracted code (INLINE)
-    # ============================================================
-    
-    print("[NNI] Validating extracted code...")
-    
-    validation_checks = {
-        "has_file_markers": "FILE" in code,
-        "has_search_space": "search_space" in code and "_type" in code,
-        "has_nni_integration": "nni.get_next_parameter" in code,
-        "has_experiment_config": "ExperimentConfig" in code,
-        "has_training_loop": "for epoch" in code or "for batch" in code,
-        "has_torch_import": "import torch" in code,
-    }
-    
-    passed = sum(1 for v in validation_checks.values() if v)
-    total = len(validation_checks)
-    score = int(100 * passed / total)
-    
-    print(f"[NNI] Validation score: {score}% ({passed}/{total} checks passed)")
-    
-    for check_name, result in validation_checks.items():
-        status = "✓" if result else "✗"
-        print(f"[NNI] {status} {check_name}")
-    
-    # ============================================================
-    # STEP 11: Extract FILE sections (INLINE)
-    # ============================================================
-    
-    print("[NNI] Extracting FILE sections...")
-    
-    pattern = r"FILE\s+(\S+\.py)\s*\n(.*?)(?=FILE|\Z)"
-    matches = list(re.finditer(pattern, code, re.DOTALL | re.MULTILINE))
-    
-    files = {}
-    for i, match in enumerate(matches, 1):
-        filename = match.group(1)
-        file_content = match.group(2).strip()
-        files[filename] = file_content
-        print(f"[NNI] {i}. {filename} - {len(file_content)} chars")
-    
-    if not files:
-        print("[NNI] ⚠️ No FILE sections found, returning code as-is")
-        files["generated_code.py"] = code
-    
+    files = extract_files_from_code(code, verbose=True)
+
+    print(f"[NNI] ✓ Extracted {len(files)} files: {list(files.keys())}")
+
+    # STEP 11: Final validation
+    print("[NNI] Performing final validation...")
+
+    if "# FILE:" not in code:
+        code = f"# FILE: config.py\n{code}"
+        print("[NNI] ⚠️ Added FILE marker to code")
+
+    # Ensure files are properly formed
+    file_markers = re.findall(r'^# FILE:\s*(\S+\.py)\s*$', code, re.MULTILINE)
+
+    if not file_markers:
+        print("[NNI] ⚠️ Warning: Could not find FILE markers")
+    else:
+        print(f"[NNI] ✓ Found {len(set(file_markers))} unique files")
+
+    # STEP 12: Return result
     print("=" * 80)
-    print("NNI AGENT COMPLETE")
+    print("NNI AGENT COMPLETE - SUCCESS")
     print("=" * 80)
-    
+    print(f"[NNI] Files: {len(files)} ({', '.join(files.keys())})")
+    print(f"[NNI] Code: {len(code):,} characters")
+    print(f"[NNI] Parse method: {parse_method}")
+
     return {
         "code": code,
-        "validation_score": score,
-        "checks": validation_checks,
         "files": files,
+        "summary": summary,
+        "error": None
     }
 
 
@@ -1436,10 +1754,15 @@ NO MARKDOWN, NO EXPLANATIONS - ONLY VALID JSON WITH CODE KEY.
 # ------------------ General Code Generation Function ------------------
 def generate_code(config: RunnableConfig, state: SummaryState):
     """
-    Generate code using a two-phase approach:
-    1. Orchestrator decides which tools to call
-    2. Orchestrator integrates the tool outputs into a single coherent solution
+    Orchestrator with proper agent communication and validation.
+    
+    Fixed issues:
+    - ✅ Correct agent output schema documentation
+    - ✅ Proper error field validation
+    - ✅ Intelligent integration (no redundant LLM calls)
+    - ✅ FILE marker validation
     """
+    
     print("---GENERATING CODE SOLUTION---")
     print("--- PHASE 1: TOOL SELECTION AND EXECUTION ---")
     
@@ -1449,7 +1772,7 @@ def generate_code(config: RunnableConfig, state: SummaryState):
     else:
         question_str = str(question)
     
-    # Define available tools
+    # Define available tools with CORRECT output format documentation
     available_tools = [
         {
             "name": "snnTorch_agent",
@@ -1465,63 +1788,69 @@ def generate_code(config: RunnableConfig, state: SummaryState):
     
     tool_selection_prompt = """You are a code generation orchestrator that decides which specialized tools to invoke.
 
-        Your task:
-        - Analyze the user request to determine which tools are needed
-        - For each tool, provide a specific query
-        - Each tool MUST return code formatted with # FILE: markers
-        - Respond with ONLY a JSON object containing tool calls
+Your task:
+- Analyze the user request to determine which tools are needed
+- For each tool, provide a specific, focused query
+- Each tool will return code formatted with # FILE: markers
+- Respond with ONLY a JSON object containing tool calls
 
-        Available tools:
-        1. snnTorch_agent: Generates SNN model code
-        - Output format: Dict with "code" key containing Python code
-        - MUST include # FILE: markers for each module/file
-        - Example output structure:
-            # FILE: model.py
-            [SNN model code]
-            
-            # FILE: utils.py
-            [helper functions]
+Available tools:
+1. snnTorch_agent: Generates SNN model code
+- Returns dict with:
+  - "code": String with all Python code, includes # FILE: markers for each module
+  - "files": Dict mapping filenames to content
+  - "summary": Description of what was generated
+  - "error": null if successful, error message if failed
+- Each file section starts with: # FILE: filename.py
+- Output example:
+    # FILE: model.py
+    [SNN model code]
+    
+    # FILE: utils.py
+    [helper functions]
 
-        2. nni_agent: Generates NNI experiment configuration
-        - Output format: Dict with "code" key containing Python code
-        - MUST include # FILE: markers for each component
-        - Example output structure:
-            # FILE: config.py
-            [NNI configuration]
-            
-            # FILE: train.py
-            [training loop]
+2. nni_agent: Generates NNI experiment configuration
+- Returns dict with:
+  - "code": String with all Python code, includes # FILE: markers for each component
+  - "files": Dict mapping filenames to content
+  - "summary": Description of what was generated
+  - "error": null if successful, error message if failed
+- Each file section starts with: # FILE: filename.py
+- Output example:
+    # FILE: config.py
+    [NNI configuration]
+    
+    # FILE: train.py
+    [training loop]
 
-        Response format (ONLY valid JSON, no markdown):
-        {
-        "tool_calls": [
-            {
-            "name": "snnTorch_agent",
-            "query": "specific question for SNN model code",
-            "expected_files": ["model.py", "utils.py"],
-            "format_requirement": "MUST include # FILE: markers for each file"
-            },
-            {
-            "name": "nni_agent",
-            "query": "specific question for NNI setup",
-            "expected_files": ["config.py", "train.py"],
-            "format_requirement": "MUST include # FILE: markers for each file"
-            }
-        ]
-        }
+Response format (ONLY valid JSON, no markdown):
+{
+  "tool_calls": [
+    {
+      "name": "snnTorch_agent",
+      "query": "specific question for SNN model code",
+      "expected_files": ["model.py", "utils.py"]
+    },
+    {
+      "name": "nni_agent",
+      "query": "specific question for NNI setup",
+      "expected_files": ["config.py", "train.py"]
+    }
+  ]
+}
 
-        Critical Rules:
-        - Only include tools that are needed for the user request
-        - Each query should be focused and specific
-        - Do NOT generate code yourself - only decide which tools to call
-        - Output ONLY valid JSON (no markdown code blocks, no explanations)
-        - You are responsible for ensuring each tool gets a well-formed query
-        """
+Critical Rules:
+- Only include tools that are needed
+- Each query should be focused and specific
+- Do NOT generate code yourself - only decide which tools to call
+- Output ONLY valid JSON (no markdown code blocks, no explanations)
 
+IMPORTANT: Each tool will return a dict. You don't need to specify format_requirement - just identify which tools to call!
+"""
     
     prompt = (
-        f"Context (previous code):\\n{state.code}\\n\\n"
-        f"User request:\\n{question_str}\\n\\n"
+        f"Context (previous code):\n{state.code}\n\n"
+        f"User request:\n{question_str}\n\n"
         f"Instructions: {tool_selection_prompt}"
     )
     
@@ -1533,9 +1862,12 @@ def generate_code(config: RunnableConfig, state: SummaryState):
         use_json_mode=True,
     ).run(prompt)
     
-    print("ORCHESTRATOR SPECIALIZED AGENTS SELECTION:\\n", response.content)
+    print("ORCHESTRATOR SPECIALIZED AGENTS SELECTION:\n", response.content)
     
-    # Parse and execute tool calls
+    # ============================================================
+    # PARSE AND EXECUTE TOOL CALLS (FIXED)
+    # ============================================================
+    
     try:
         response_data = json.loads(response.content)
         tool_calls = response_data.get("tool_calls", [])
@@ -1552,6 +1884,7 @@ def generate_code(config: RunnableConfig, state: SummaryState):
     
     # Execute tools and collect outputs
     tool_outputs = {}
+    failed_tools = []
 
     for call in tool_calls:
         tool_name = call.get("name")
@@ -1567,193 +1900,176 @@ def generate_code(config: RunnableConfig, state: SummaryState):
         if expected_files:
             print(f"   Expected output files: {expected_files}")
         
-        # Execute the tool
+        # ============================================================
+        # EXECUTE THE TOOL
+        # ============================================================
+        
         result = None
         if tool_name == "snnTorch_agent":
             result = snnTorch_agent(query, config, state)
         elif tool_name == "nni_agent":
             result = nni_agent(query, config, state)
-        
-        if not result:
-            print(f"   ❌ Tool returned empty result")
-            continue
-        
-        # Extract code properly
-        if isinstance(result, dict):
-            code = result.get("code", "")
-            if result.get("error"):
-                print(f"   ⚠️  Agent error: {result['error']}")
-                continue  # Skip this tool if it failed
         else:
-            code = str(result)
-        
-        if not code or len(code) < 10:
-            print(f"   ❌ Tool returned insufficient code ({len(code)} chars)")
+            print(f"   ❌ Unknown tool: {tool_name}")
+            failed_tools.append((tool_name, "Unknown tool"))
             continue
-
         
-        # VALIDATION: Check FILE marker format
+        # ============================================================
+        # VALIDATE RESULT FORMAT (FIXED)
+        # ============================================================
+        
+        # Check if result is dict
+        if not isinstance(result, dict):
+            print(f"   ❌ Tool returned non-dict: {type(result)}")
+            failed_tools.append((tool_name, f"Non-dict result: {type(result)}"))
+            continue
+        
+        # CRITICAL FIX: Check error field FIRST
+        error = result.get("error")
+        if error is not None:
+            error_msg = str(error)
+            print(f"   ❌ Tool failed with error: {error_msg}")
+            print(f"   ⚠️  Skipping this tool output")
+            failed_tools.append((tool_name, error_msg))
+            continue  # Skip this tool - it failed
+        
+        # ============================================================
+        # EXTRACT AND VALIDATE CODE
+        # ============================================================
+        
+        code = result.get("code", "")
+        
+        if not code or len(code.strip()) < 50:
+            print(f"   ❌ Tool returned insufficient code ({len(code)} chars)")
+            failed_tools.append((tool_name, "Insufficient code"))
+            continue
+        
+        # CRITICAL FIX: Validate FILE markers BEFORE accepting code
         import re
         file_markers = re.findall(r'^# FILE:\s*(\w+(?:\.\w+)?)\s*$', code, re.MULTILINE)
         
-        print(f"   ✓ Received {len(code)} characters of code")
-        
         if len(file_markers) == 0:
-            print(f"   ⚠️  WARNING: No # FILE: markers found!")
-            print(f"   Code will be wrapped in integration phase")
-            # DO NOT wrap here - let integration handle it
-            # Just accept the code as-is
-            file_markers = ["unknown"]
+            print(f"   ❌ CRITICAL: Code has no # FILE: markers")
+            print(f"   Code preview: {code[:200]}...")
+            failed_tools.append((tool_name, "No FILE markers"))
+            continue
         
-        print(f"   ✓ Detected {len(file_markers)} file(s): {file_markers}")
+        print(f"   ✓ Code length: {len(code):,} characters")
+        print(f"   ✓ Files detected: {file_markers}")
+        print(f"   ✓ Files found: {len(file_markers)} ({', '.join(file_markers)})")
+        
+        # Get summary
+        summary = result.get("summary", "Generated code")
+        print(f"   ✓ Summary: {summary[:100]}...")
+        
+        # Get files dict for logging
+        files = result.get("files", {})
+        print(f"   ✓ Output dict has {len(files)} files")
+        
+        # SUCCESS: Store this tool's output
+        tool_outputs[tool_name] = {
+            "code": code,
+            "files": files,
+            "summary": summary
+        }
+        print(f"   ✅ ACCEPTED: {tool_name} output ready for integration")
 
-        tool_outputs[tool_name] = code
-
+    # ============================================================
+    # CHECK IF WE GOT ANY VALID OUTPUTS
+    # ============================================================
+    
     if not tool_outputs:
-        print("\n❌ ERROR: No code was generated from any tool")
+        print(f"\n❌ ERROR: No code was generated from any tool")
+        if failed_tools:
+            print(f"Failed tools:")
+            for tool_name, reason in failed_tools:
+                print(f"  - {tool_name}: {reason}")
         return "Error: No code generated from tools"
 
-    print(f"\n✅ Collected {len(tool_outputs)} tool outputs ready for integration")
+    print(f"\n✅ Collected {len(tool_outputs)} valid tool outputs")
+    if failed_tools:
+        print(f"⚠️  {len(failed_tools)} tools failed and were skipped")
 
+    # ============================================================
+    # PHASE 2: CODE INTEGRATION (SIMPLIFIED & FIXED)
+    # ============================================================
     
-    print(f"\\n--- PHASE 2: CODE INTEGRATION ---")
+    print(f"\n--- PHASE 2: CODE INTEGRATION ---")
     print(f"Integrating {len(tool_outputs)} code components...")
     
-    # INTEGRATION STEP: Have orchestrator combine the code
-    integration_prompt = f"""You are a code integration expert. You have received code from multiple specialized agents.
-
-    CRITICAL FORMATTING RULES:
-    - Output code with # FILE: markers for each file
-    - Format: # FILE: filename.py on its own line
-    - Preserve original multi-file structure
-    - NO markdown code fences
-    - NO explanatory text
-    - ONLY Python code with FILE markers
-
-    IMPORTANT: Structure your code with file markers like this:
-
-    # FILE: model.py
-    [model code here]
-
-    # FILE: config.py
-    [config code here]
-
-    # FILE: training.py
-    [training code here]
-
-    Start each new file section with: # FILE: filename.py
-
-    User's original request:
-    {question_str}
-
-    Code components received:
-    """
-    
-    # Add each tool output to the prompt
-    for tool_name, code in tool_outputs.items():
-        integration_prompt += f"\\n\\n=== Code from {tool_name} ===\\n{code}\\n"
-    
-    integration_prompt = """You are a code integration expert with STRICT FORMATTING requirements.
-
-        Your PRIMARY task:
-        - Integrate multiple code components into ONE coherent solution
-        - Structure output with # FILE: markers for each distinct file
-        - Ensure all files work together seamlessly
-
-        CRITICAL FORMATTING RULES (MUST FOLLOW):
-
-        1. OUTPUT STRUCTURE:
-        Every file MUST start with: # FILE: filename.py
+    # FIXED: If only one tool, use its output directly (no re-running LLM)
+    if len(tool_outputs) == 1:
+        tool_name = list(tool_outputs.keys())[0]
+        tool_output = tool_outputs[tool_name]
+        integrated_code = tool_output["code"]
         
-        Example:
-        # FILE: model.py
-        import torch
-        import snntorch as snn
+        print(f"\n📦 Single tool output detected")
+        print(f"   Tool: {tool_name}")
+        print(f"   Summary: {tool_output['summary'][:100]}...")
+        print(f"   Using output directly (no merging needed)")
         
-        class SNNModel(torch.nn.Module):
-            pass
+    else:
+        # FIXED: For multiple tools, intelligently merge WITHOUT re-running LLM
+        print(f"\n📦 Multiple tool outputs - merging intelligently...")
         
-        # FILE: config.py
-        LEARNING_RATE = 0.001
+        # Extract all files from all tools
+        all_files_dict = {}  # filename -> {tool_name: ..., content: ...}
         
-        # FILE: training.py
-        from model import SNNModel
-        from config import LEARNING_RATE
-
-        2. FILE MARKERS:
-        - Format: "# FILE: filename.py" (with exactly one space after #)
-        - Must be at start of line (no indentation)
-        - filename must include .py extension
-        - Each new file starts with its own marker
-        - NEVER reuse markers for the same file
-
-        3. FILE ORGANIZATION:
-        - Arrange files in logical order (dependencies first):
-            1. config.py or constants
-            2. model.py or classes
-            3. utils.py or helper functions
-            4. main.py or training.py (entry point last)
-        
-        4. IMPORTS:
-        - Consolidate all imports at the top of each file
-        - Use relative imports between your generated files
-        - Example: from config import PARAM
-        - Do NOT repeat imports across files
-
-        5. OUTPUT CONSTRAINTS:
-        - Output ONLY Python code with # FILE: markers
-        - NO markdown code fences (```python, ``` etc)
-        - NO section headers (===, ---, etc)
-        - NO explanations or comments outside code
-        - NO "Here is the integrated code" preamble
-        - Start directly with "# FILE: first_file.py"
-
-        6. VALIDATION:
-        - Each file must be self-contained (can understand imports)
-        - NNI configurations must reference correct model class names
-        - All imports must be available (standard library or mentioned in requirements)
-        - Clear dependencies documented in comments
-
-        USER REQUEST: {question_str}
-
-        CODE COMPONENTS TO INTEGRATE:
-        """
+        for tool_name, tool_output in tool_outputs.items():
+            code = tool_output["code"]
+            files = tool_output.get("files", {})
             
-        # Add each tool output
-    for tool_name, code in tool_outputs.items():
-        integration_prompt += f"\n=== CODE FROM {tool_name} ===\n{code}\n"
-
-        integration_prompt += """
-
-        FINAL INTEGRATION CHECKLIST:
-        □ All files have "# FILE: filename.py" markers
-        □ Files ordered by dependency
-        □ No duplicate imports
-        □ Relative imports between files work
-        □ Model classes match NNI config references
-        □ All files present as expected
-
-        Remember: Your output is parsed programmatically.
-        Any deviation from # FILE: format will break the code execution system.
-
-        Output ONLY the integrated code. Start with "# FILE: " immediately.
-        """
-
-    
-    # Get integration response
-    integration_response = Agent(
-        model=Ollama(id="gpt-oss:20b"),
-        tools=[],
-        show_tool_calls=False,
-    ).run(integration_prompt)
-
-    integrated_code = integration_response.content
+            print(f"\n   From {tool_name}:")
+            
+            # Extract files using regex
+            file_sections = re.findall(
+                r'^# FILE:\s*(\S+\.py)\s*\n((?:(?!^# FILE:).)*)',
+                code,
+                re.MULTILINE | re.DOTALL
+            )
+            
+            for filename, file_content in file_sections:
+                file_content = file_content.strip()
+                
+                if filename not in all_files_dict:
+                    all_files_dict[filename] = {
+                        "tool_name": tool_name,
+                        "content": file_content
+                    }
+                    print(f"      Added: {filename} ({len(file_content):,} chars)")
+                else:
+                    # File already exists - keep the first one (from higher priority tool)
+                    existing_tool = all_files_dict[filename]["tool_name"]
+                    print(f"      Skipped duplicate: {filename} (already from {existing_tool})")
+        
+        # Define file priority order for proper sequencing
+        file_priority = {
+            'config.py': 1,
+            'search_space.json': 2,
+            'model.py': 3,
+            'utils.py': 4,
+            'train.py': 5,
+            'main.py': 6,
+            'experiment.py': 7,
+        }
+        
+        # Sort files by priority and concatenate
+        sorted_files = sorted(
+            all_files_dict.items(),
+            key=lambda x: file_priority.get(x[0], 999)
+        )
+        
+        integrated_code = ""
+        for filename, file_info in sorted_files:
+            integrated_code += f"# FILE: {filename}\n{file_info['content']}\n\n"
+        
+        integrated_code = integrated_code.strip()
+        
+        print(f"\n   ✓ Merged {len(all_files_dict)} files in priority order")
 
     # ============================================================
     # VALIDATION: Check integration output format
     # ============================================================
-
-    import re
 
     print("\n" + "="*80)
     print("INTEGRATION OUTPUT VALIDATION")
@@ -1762,7 +2078,7 @@ def generate_code(config: RunnableConfig, state: SummaryState):
     # Extract all file markers
     file_markers = re.findall(r'^# FILE:\s*(\w+(?:\.\w+)?)\s*$', integrated_code, re.MULTILINE)
 
-    print(f"\n📊 Files detected: {len(file_markers)}")
+    print(f"\n📊 Files in output: {len(file_markers)}")
     for i, fname in enumerate(file_markers, 1):
         print(f"   {i}. {fname}")
 
@@ -1771,40 +2087,36 @@ def generate_code(config: RunnableConfig, state: SummaryState):
         "has_file_markers": len(file_markers) > 0,
         "files_have_py_extension": all(f.endswith('.py') for f in file_markers),
         "unique_filenames": len(file_markers) == len(set(file_markers)),
-        "has_model_file": any('model' in f.lower() for f in file_markers),
+        "has_code_file": any(f.lower() in ['model.py', 'config.py', 'main.py'] for f in file_markers),
         "starts_with_file_marker": integrated_code.lstrip().startswith("# FILE:"),
     }
 
     passed = sum(1 for v in checks.values() if v)
     score = int((passed / len(checks)) * 100)
 
-    print(f"\n✓ Validation score: {score}% ({passed}/{len(checks)} checks passed)")
+    print(f"\n✓ Validation score: {score}% ({passed}/{len(checks)} checks)")
 
     for check_name, result in checks.items():
         status = "✅" if result else "❌"
         print(f"  {status} {check_name}")
 
-    # Warnings for common issues
+    # Fix common issues
     if len(file_markers) == 0:
         print("\n⚠️  CRITICAL: No # FILE: markers found!")
-        print("   Attempting to wrap output...")
+        print("   This should not happen - tools should provide them!")
         integrated_code = f"# FILE: main.py\n{integrated_code}"
 
     if "```" in integrated_code:
-        print("\n⚠️  WARNING: Found markdown code fences (```)")
-        print("   Removing markdown formatting...")
+        print("\n⚠️  WARNING: Found markdown code fences")
         integrated_code = re.sub(r"```[^`]*\n?", "", integrated_code)
 
-    if not integrated_code.lstrip().startswith("# FILE:"):
-        print("\n⚠️  WARNING: Output doesn't start with # FILE: marker")
-        print("   This may cause parsing issues!")
-
-    print(f"\nFinal code length: {len(integrated_code):,} characters")
+    print(f"\n✅ Final output: {len(integrated_code):,} characters")
+    print(f"✅ Ready for execution: {len(file_markers)} files")
     print("="*80 + "\n")
 
+    # Save to state
     state.code = integrated_code
     return integrated_code
-
 
 
 
@@ -2340,7 +2652,7 @@ Do NOT include explanations or code fences. Just imports."""
         feedback = f"❌ Execution failed.\n\nError:\n{error_msg}"
     
     return {
-        "sandbox_feedback_pyright": static_result or "No result",
+        #"sandbox_feedback_pyright": static_result or "No result",
         "sandbox_feedback_execution": {
             "status": "executed",
             "exit_code": sandbox_result["exit_code"],
