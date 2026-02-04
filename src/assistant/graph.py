@@ -1425,6 +1425,13 @@ RANKED DOCUMENTATION (most relevant first):
 
 {snn_context[:8000]}
 
+KNOWLEDGE PRIORITY (in order):
+1. Documentation context provided above (primary source)
+2. snnTorch official docs/API reference (if gap exists)
+3. General PyTorch knowledge (only for non-snnTorch specifics)
+4. Pre-training knowledge (fallback only for integration patterns)
+
+
 
 OUTPUT FORMAT (CRITICAL):
 Structure your code with # FILE: markers:
@@ -1646,6 +1653,13 @@ You are an NNI configuration expert. Your task:
 
 CONTEXT (ranked by relevance):
 {nni_context[:5000]}
+
+
+KNOWLEDGE PRIORITY (in order):
+1. Documentation context provided above (primary source)
+2. nni official docs/API reference (if gap exists)
+3. Pre-training knowledge (fallback only for integration patterns)
+
 
 Generate complete NNI configuration with:
 - config.py: Search space definition, experiment config, tuner setup
@@ -2919,6 +2933,8 @@ def decide_to_finish(state: SummaryState):
 
 def collect_feedback(state: SummaryState, config: RunnableConfig):
     print("---COLLECTING FEEDBACK FROM USER---")
+
+    state.research_topic = ""  # reset research topic
 
     #sandbox_pyright = Sandbox.create("OpenEvalsPython") # already with pyright and uv installed
     static_evaluator = create_pyright_evaluator()
